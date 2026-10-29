@@ -47,15 +47,28 @@ void independentFailure(){
     Listener closedData(false),cmd;Settings inverse;inverse.ip=L"127.0.0.1";inverse.receivePort=closedData.port;inverse.sendPort=cmd.port;
     CHECK(e.start(inverse));SOCKET cp=cmd.acceptOne();CHECK(waitOnline(e,false,true));Sleep(10);CHECK(e.queue(Bytes({'L'})));CHECK(readExactly(cp,1)==Bytes({'L'}));e.stop();closesocket(cp);
 }
+std::string goodInventory(){return "CNCA0 PortName=COM7,EmuOverrun=yes\nCNCB0 PortName=COM8,dsr=ropen,EmuBR=yes\n";}
+struct SerialFixture{
+    std::wstring path;
+    SerialFixture(){wchar_t folder[MAX_PATH]={},file[MAX_PATH]={};GetTempPathW(MAX_PATH,folder);CHECK(GetTempFileNameW(folder,L"SCM",0,file));path=file;serialbridge::testBackend.path=path;serialbridge::testBackend.inventory=goodInventory();serialbridge::testBackend.enabled=true;serialbridge::testBackend.peer=true;serialbridge::testBackend.failWrite=false;}
+    ~SerialFixture(){serialbridge::testBackend.enabled=false;DeleteFileW(path.c_str());}
+    Bytes contents(){HANDLE h=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);CHECK(h!=INVALID_HANDLE_VALUE);DWORD size=GetFileSize(h,nullptr),count=0;CHECK(size<100000);Bytes bytes(size);if(size)CHECK(ReadFile(h,bytes.data(),size,&count,nullptr)&&count==size);CloseHandle(h);return bytes;}
+};
+Settings withSerial(int rx,int tx){Settings c;c.ip=L"127.0.0.1";c.receivePort=rx;c.sendPort=tx;c.serial.enabled=true;c.serial.bridge=L"COM8";c.serial.application=L"COM7";c.serial.sharedApproved=true;return c;}
+bool waitCom(TcpEngine& e,unsigned long long bytes){ULONGLONG end=GetTickCount64()+1800;while(GetTickCount64()<end){if(e.serialBytes==bytes)return true;Sleep(5);}return false;}
+bool waitFault(TcpEngine& e){ULONGLONG end=GetTickCount64()+1800;while(GetTickCount64()<end){if(e.serialFault)return true;Sleep(5);}return false;}
+
 void uiAndConfig(){
+    SerialFixture serialFixture;
     wchar_t base[MAX_PATH]={},folder[MAX_PATH]={};GetTempPathW(MAX_PATH,base);GetTempFileNameW(base,L"STC",0,folder);DeleteFileW(folder);CHECK(CreateDirectoryW(folder,nullptr));directory=folder;configPath=directory+L"\\tcp.ini";
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"TCPOnlyTestWindow";CHECK(RegisterClassW(&wc));
-    HWND h=CreateWindowW(wc.lpszClassName,L"TCP test",WS_OVERLAPPED,0,0,850,650,nullptr,nullptr,wc.hInstance,nullptr);CHECK(h);CHECK(GetDlgItem(h,LOG));CHECK(GetDlgItem(h,SEND));CHECK(!GetDlgItem(h,110));CHECK(!GetDlgItem(h,TXPORT));CHECK(!GetDlgItem(h,COM_SHARED));CHECK(!GetDlgItem(h,UI_TX));
+    HWND h=CreateWindowW(wc.lpszClassName,L"TCP test",WS_OVERLAPPED,0,0,850,650,nullptr,nullptr,wc.hInstance,nullptr);CHECK(h);CHECK(GetDlgItem(h,LOG));CHECK(GetDlgItem(h,SEND));CHECK(!GetDlgItem(h,110));CHECK(!GetDlgItem(h,TXPORT));CHECK(!GetDlgItem(h,COM_SHARED));CHECK(!GetDlgItem(h,UI_TX));CHECK(!GetDlgItem(h,COM_ENABLE));CHECK(serialFromUI().enabled);CHECK(savedFormSettings().serial.enabled);
     set(PAYLOAD,L"4C");hexMode=true;SendMessageW(GetDlgItem(h,ENCODING),CB_SETCURSEL,0,0);SendMessageW(h,WM_COMMAND,MAKEWPARAM(ENCODING,CBN_SELCHANGE),(LPARAM)GetDlgItem(h,ENCODING));CHECK(!hexMode&&text(PAYLOAD)==L"L");CHECK(convertEncoding(true,false)&&text(PAYLOAD)==L"4C");
     set(PAYLOAD,L"GG");CHECK(!convertEncoding(false,false)&&hexMode&&text(PAYLOAD)==L"GG");
     for(int i=0;i<256;++i){Bytes b(1,(unsigned char)i),decoded;CHECK(tcpcodecs::parseTrigger(tcpcodecs::formatAscii(b),false,decoded)&&decoded==b);CHECK(tcpcodecs::parseTrigger(tcpcodecs::formatHex(b),true,decoded)&&decoded==b);}
     Settings c;c.ip=L"127.0.0.1";c.receivePort=c.sendPort=9004;set(PAYLOAD,L"LON\\r");hexMode=false;Bytes b={'L','O','N',13};CHECK(persist(c,b));CHECK(ini(L"Encoding")==L"ASCII"&&ini(L"TriggerHex")==L"4C 4F 4E 0D");
     HANDLE lock=CreateFileW(configPath.c_str(),GENERIC_READ,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);CHECK(lock!=INVALID_HANDLE_VALUE);c.sendPort=9005;CHECK(!persist(c,b));CloseHandle(lock);CHECK(ini(L"SendPort")==L"9004");
+    CHECK(WritePrivateProfileStringW(L"Serial",L"Enabled",L"0",configPath.c_str()));CHECK(serialFromUI().enabled&&savedFormSettings().serial.enabled);
     CHECK(ini(L"CommunicationPort")==L"9004");
     CHECK(WritePrivateProfileStringW(L"TCP",L"CommunicationPort",nullptr,configPath.c_str()));CHECK(WritePrivateProfileStringW(L"TCP",L"SendPort",L"9005",configPath.c_str()));CHECK(communicationPortText()==L""); // legacy ReceivePort!=SendPort must not be guessed
     CHECK(WritePrivateProfileStringW(L"TCP",L"SendPort",L"09004",configPath.c_str()));CHECK(communicationPortText()==L"9004");
@@ -63,12 +76,13 @@ void uiAndConfig(){
     CHECK(WritePrivateProfileStringW(L"TCP",L"CommunicationPort",L"not-a-port",configPath.c_str()));CHECK(communicationPortText().empty());CHECK(WritePrivateProfileStringW(L"TCP",L"CommunicationPort",L"9004",configPath.c_str()));
     openPreferences();CHECK(preferencesWindow);CHECK(!GetDlgItem(preferencesWindow,PREF_SHARED));SendMessageW(preferencesWindow,WM_COMMAND,PREF_CANCEL,0);CHECK(!preferencesWindow);
     CHECK(SendMessageW(GetDlgItem(h,HOTKEY),BM_GETCHECK,0,0)==BST_UNCHECKED);
-    // Actual GUI connect/send/timer integration without any COM endpoint.
+    // Actual GUI connect/send/timer always relays using the explicitly simulated serial fixture.
+    set(COM_BRIDGE,L"COM8");set(COM_APP,L"COM7");CHECK(serialFromUI().enabled);
     Listener scanner;set(IP,L"127.0.0.1");set(RXPORT,std::to_wstring(scanner.port));set(TXPORT,std::to_wstring(scanner.port));
     set(PAYLOAD,L"4C 4F 4E 0D");hexMode=true;SendMessageW(GetDlgItem(h,ENCODING),CB_SETCURSEL,1,0);
     SendMessageW(h,WM_COMMAND,CONNECT,0);SOCKET scanPeer=scanner.acceptOne();CHECK(waitOnline(engine,true,true));Sleep(10);
     CHECK(send(scanPeer,"123\r",4,0)==4);ULONGLONG until=GetTickCount64()+1200;
-    while(engine.rxBytes<4&&GetTickCount64()<until)Sleep(5);CHECK(engine.rxBytes==4);SendMessageW(h,WM_TIMER,1,0);
+    while(engine.rxBytes<4&&GetTickCount64()<until)Sleep(5);CHECK(engine.rxBytes==4);CHECK(waitCom(engine,4));CHECK(serialFixture.contents()==Bytes({'1','2','3',13}));SendMessageW(h,WM_TIMER,1,0);
     CHECK(text(LOG).find(L"31 32 33 0D")!=std::wstring::npos&&text(LOG).find(L"123\\r")!=std::wstring::npos);
     SendMessageW(h,WM_COMMAND,SEND,0);CHECK(readExactly(scanPeer,4)==Bytes({'L','O','N',13}));
     // Exact Win64 keyboard packet (40 bytes), not sizeof(RAWINPUT)==48.
@@ -96,16 +110,6 @@ void uiAndConfig(){
     DestroyWindow(h);window=nullptr;DeleteFileW(configPath.c_str());DeleteFileW((directory+L"\\logs\\tcp.log").c_str());RemoveDirectoryW((directory+L"\\logs").c_str());RemoveDirectoryW(directory.c_str());
 }
 
-std::string goodInventory(){return "CNCA0 PortName=COM7,EmuOverrun=yes\nCNCB0 PortName=COM8,dsr=ropen,EmuBR=yes\n";}
-struct SerialFixture{
-    std::wstring path;
-    SerialFixture(){wchar_t folder[MAX_PATH]={},file[MAX_PATH]={};GetTempPathW(MAX_PATH,folder);CHECK(GetTempFileNameW(folder,L"SCM",0,file));path=file;serialbridge::testBackend.path=path;serialbridge::testBackend.inventory=goodInventory();serialbridge::testBackend.enabled=true;serialbridge::testBackend.peer=true;serialbridge::testBackend.failWrite=false;}
-    ~SerialFixture(){serialbridge::testBackend.enabled=false;DeleteFileW(path.c_str());}
-    Bytes contents(){HANDLE h=CreateFileW(path.c_str(),GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,FILE_ATTRIBUTE_NORMAL,nullptr);CHECK(h!=INVALID_HANDLE_VALUE);DWORD size=GetFileSize(h,nullptr),count=0;CHECK(size<100000);Bytes bytes(size);if(size)CHECK(ReadFile(h,bytes.data(),size,&count,nullptr)&&count==size);CloseHandle(h);return bytes;}
-};
-Settings withSerial(int rx,int tx){Settings c;c.ip=L"127.0.0.1";c.receivePort=rx;c.sendPort=tx;c.serial.enabled=true;c.serial.bridge=L"COM8";c.serial.application=L"COM7";c.serial.sharedApproved=true;return c;}
-bool waitCom(TcpEngine& e,unsigned long long bytes){ULONGLONG end=GetTickCount64()+1800;while(GetTickCount64()<end){if(e.serialBytes==bytes)return true;Sleep(5);}return false;}
-bool waitFault(TcpEngine& e){ULONGLONG end=GetTickCount64()+1800;while(GetTickCount64()<end){if(e.serialFault)return true;Sleep(5);}return false;}
 void serialShared(){
     SerialFixture f;Listener scanner;TcpEngine e;Settings c=withSerial(scanner.port,scanner.port);
     c.serial.sharedApproved=false;CHECK(!e.start(c));c.serial.sharedApproved=true;CHECK(e.start(c));SOCKET peer=scanner.acceptOne();CHECK(waitOnline(e,true,true));CHECK(e.serialOpened&&e.serialPeer);Sleep(20);
@@ -179,8 +183,8 @@ void nativeRegistryEvidence(){
 void uiComRoundtrip(){
     SerialFixture f;wchar_t base[MAX_PATH]={},folder[MAX_PATH]={};GetTempPathW(MAX_PATH,base);GetTempFileNameW(base,L"SCU",0,folder);DeleteFileW(folder);CHECK(CreateDirectoryW(folder,nullptr));directory=folder;configPath=directory+L"\\tcp.ini";
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"TCPComTestWindow";CHECK(RegisterClassW(&wc));
-    HWND h=CreateWindowW(wc.lpszClassName,L"COM UI test",WS_OVERLAPPED,0,0,850,715,nullptr,nullptr,wc.hInstance,nullptr);CHECK(h);CHECK(GetDlgItem(h,COM_BRIDGE)&&GetDlgItem(h,COM_PAIR));CHECK(SendMessageW(GetDlgItem(h,COM_ENABLE),BM_GETCHECK,0,0)==BST_UNCHECKED);
-    set(COM_BRIDGE,L"com8");set(COM_APP,L"COM7");SendMessageW(GetDlgItem(h,COM_ENABLE),BM_SETCHECK,BST_CHECKED,0);SendMessageW(GetDlgItem(h,COM_SHARED),BM_SETCHECK,BST_CHECKED,0);
+    HWND h=CreateWindowW(wc.lpszClassName,L"COM UI test",WS_OVERLAPPED,0,0,850,715,nullptr,nullptr,wc.hInstance,nullptr);CHECK(h);CHECK(GetDlgItem(h,COM_BRIDGE)&&GetDlgItem(h,COM_PAIR));CHECK(!GetDlgItem(h,COM_ENABLE)&&serialFromUI().enabled);
+    set(COM_BRIDGE,L"com8");set(COM_APP,L"COM7");SendMessageW(GetDlgItem(h,COM_SHARED),BM_SETCHECK,BST_CHECKED,0);
     SendMessageW(GetDlgItem(h,COM_BAUD),CB_SETCURSEL,7,0);SendMessageW(GetDlgItem(h,COM_PARITY),CB_SETCURSEL,2,0);SendMessageW(GetDlgItem(h,COM_STOP),CB_SETCURSEL,1,0);
     SerialOptions check=serialFromUI();CHECK(validSerialOptions(check)&&check.bridge==L"COM8"&&check.application==L"COM7"&&check.baud==115200&&check.parity==EVENPARITY&&check.stopBits==TWOSTOPBITS);
     Listener scan;set(IP,L"127.0.0.1");set(RXPORT,std::to_wstring(scan.port));set(TXPORT,std::to_wstring(scan.port));set(PAYLOAD,L"4C 0D");hexMode=true;
@@ -215,8 +219,8 @@ void startupPersistenceAndOwnership(){
 void startupConnectsWithoutSending(){
     SerialFixture fixture;wchar_t base[MAX_PATH]={},folder[MAX_PATH]={};GetTempPathW(MAX_PATH,base);CHECK(GetTempFileNameW(base,L"STB",0,folder));DeleteFileW(folder);CHECK(CreateDirectoryW(folder,nullptr));directory=folder;configPath=directory+L"\\tcp.ini";
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"StartupIntegrationWindow";CHECK(RegisterClassW(&wc));HWND h=CreateWindowW(wc.lpszClassName,L"startup test",WS_OVERLAPPED,0,0,976,699,nullptr,nullptr,wc.hInstance,nullptr);CHECK(h);
-    Listener listener;Settings c=withSerial(listener.port,listener.port);set(IP,c.ip);set(RXPORT,std::to_wstring(c.receivePort));set(TXPORT,std::to_wstring(c.sendPort));set(COM_BRIDGE,L"COM8");set(COM_APP,L"COM7");SendMessageW(GetDlgItem(h,COM_ENABLE),BM_SETCHECK,BST_CHECKED,0);SendMessageW(GetDlgItem(h,COM_SHARED),BM_SETCHECK,BST_CHECKED,0);set(PAYLOAD,L"4C 0D");hexMode=true;
-    c=currentFormSettings();CHECK(persist(c,Bytes({'L',13})));startupPrefs.connect=true;startupPrefs.hotkey=true;startupPrefs.shared=false;startupPrefs.signature=L"old-unused-approval";startupPrefs.delay=0;beginStartup();CHECK(startupPending);SendMessageW(h,WM_COMMAND,DISCONNECT,0);CHECK(!startupPending);SendMessageW(h,WM_TIMER,2,0);CHECK(!engine.running&&!startupConsumed&&!listener.hasExtra());beginStartup();CHECK(startupPending);CHECK(SendMessageW(GetDlgItem(h,HOTKEY),BM_GETCHECK,0,0)==BST_CHECKED);runStartupOnce();SOCKET peer=listener.acceptOne();CHECK(waitOnline(engine,true,true));Sleep(35);
+    Listener listener;Settings c=withSerial(listener.port,listener.port);set(IP,c.ip);set(RXPORT,std::to_wstring(c.receivePort));set(TXPORT,std::to_wstring(c.sendPort));set(COM_BRIDGE,L"COM8");set(COM_APP,L"COM7");SendMessageW(GetDlgItem(h,COM_SHARED),BM_SETCHECK,BST_CHECKED,0);set(PAYLOAD,L"4C 0D");hexMode=true;
+    c=currentFormSettings();CHECK(persist(c,Bytes({'L',13})));CHECK(WritePrivateProfileStringW(L"Serial",L"Enabled",L"0",configPath.c_str()));CHECK(savedFormSettings().serial.enabled);startupPrefs.connect=true;startupPrefs.hotkey=true;startupPrefs.shared=false;startupPrefs.signature=L"old-unused-approval";startupPrefs.delay=0;beginStartup();CHECK(startupPending);SendMessageW(h,WM_COMMAND,DISCONNECT,0);CHECK(!startupPending);SendMessageW(h,WM_TIMER,2,0);CHECK(!engine.running&&!startupConsumed&&!listener.hasExtra());beginStartup();CHECK(startupPending);CHECK(SendMessageW(GetDlgItem(h,HOTKEY),BM_GETCHECK,0,0)==BST_CHECKED);runStartupOnce();SOCKET peer=listener.acceptOne();CHECK(waitOnline(engine,true,true));Sleep(35);
     fd_set set;FD_ZERO(&set);FD_SET(peer,&set);timeval wait={0,100000};CHECK(select(0,&set,nullptr,nullptr,&wait)==0);CHECK(engine.txBytes==0);CHECK(send(peer,"BOOT-CODE\r",10,0)==10);CHECK(waitCom(engine,10));CHECK(fixture.contents()==Bytes({'B','O','O','T','-','C','O','D','E',13}));runStartupOnce();CHECK(!listener.hasExtra());CHECK(engine.txBytes==0);
     SendMessageW(h,WM_COMMAND,DISCONNECT,0);closesocket(peer);startupPrefs.connect=false;DestroyWindow(h);window=nullptr;DeleteFileW(configPath.c_str());DeleteFileW((directory+L"\\logs\\tcp.log").c_str());RemoveDirectoryW((directory+L"\\logs").c_str());CHECK(RemoveDirectoryW(directory.c_str()));
     puts("[TEST] configured delayed startup connects once and forwards unsolicited bytes; no lifecycle trigger/no reconnect replay; user consent and keyboard options restored");
@@ -232,5 +236,5 @@ int main(){
     std::wstring message=com0com::DescribeCaptureFailure(diagnostic);CHECK(message.find(L"解析")!=std::wstring::npos&&message.find(L"740")==std::wstring::npos&&message.find(L"malformed parameter")!=std::wstring::npos);
     CHECK(startup::CommandFor(L"E:\\Tools\\扫码工具\\SR5000TcpComBridge.exe")==L"\"E:\\Tools\\扫码工具\\SR5000TcpComBridge.exe\" --autostart");
     WSADATA w={};CHECK(WSAStartup(MAKEWORD(2,2),&w)==0);CHECK(!requiresCom());CHECK(!validSettings(Settings{}));puts("[TEST] UI");uiAndConfig();puts("[TEST] shared TCP");shared();puts("[TEST] split TCP");separate();puts("[TEST] independent failure");independentFailure();puts("[TEST] COM shared");serialShared();puts("[TEST] COM split faults");serialSplitAndFaults();puts("[TEST] COM-enabled GUI Enter -> TCP -> serial; persistence");uiComRoundtrip();unrelatedUnassignedPairMustNotBlockRelay();nativeRegistryEvidence();startupPersistenceAndOwnership();startupConnectsWithoutSending();engine.stop();WSACleanup();std::wstring liveRunAfter;CHECK(startup::ReadRun(liveRunAfter)==ERROR_SUCCESS&&liveRunBefore==liveRunAfter);
-    puts("PASS: COM optional; actual TCP worker -> explicit fake serial file, binary/fragmented unsolicited forwarding, shared ACK consent, split ACK excluded, command-failure RX relay, peer close fault latch, failed write latch, fresh pair recheck on reconnect, no old-code replay; no real driver installed. Original TCP/hotkey tests: actual shared/split engine, unsolicited binary RX, exact ASCII/HEX TX, separate ACK channel, independent channel failure, disconnect/no replay, selector conversion, 256-byte roundtrips, atomic config lock failure, hotkey initially off, Win64 exact40-byte raw keyboard -> real network trigger, repeat suppression, key-up/new press, stale/off/own-window/mouse rejection");
+    puts("PASS: application manual/startup always enables COM forwarding, no enable control and legacy Enabled=0 ignored; internal engine isolated regressions retained; actual TCP worker -> explicit fake serial file, binary/fragmented unsolicited forwarding, shared ACK consent, split ACK excluded, command-failure RX relay, peer close fault latch, failed write latch, fresh pair recheck on reconnect, no old-code replay; no real driver installed. Original TCP/hotkey tests: actual shared/split engine, unsolicited binary RX, exact ASCII/HEX TX, separate ACK channel, independent channel failure, disconnect/no replay, selector conversion, 256-byte roundtrips, atomic config lock failure, hotkey initially off, Win64 exact40-byte raw keyboard -> real network trigger, repeat suppression, key-up/new press, stale/off/own-window/mouse rejection");
 }

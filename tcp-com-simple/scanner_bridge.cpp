@@ -137,7 +137,7 @@ std::wstring communicationPortText(){
 std::wstring serialIni(const wchar_t* key,const wchar_t* fallback=L""){wchar_t b[1024]={};GetPrivateProfileStringW(L"Serial",key,fallback,b,1024,configPath.c_str());return b;}
 std::wstring upperCom(std::wstring name){for(auto& c:name)if(c>=L'a'&&c<=L'z')c=(wchar_t)(c-L'a'+L'A');return name;}
 SerialOptions serialFromUI(){
-    SerialOptions o;o.enabled=SendMessageW(GetDlgItem(window,COM_ENABLE),BM_GETCHECK,0,0)==BST_CHECKED;
+    SerialOptions o;o.enabled=true; // This tool always forwards TCP payloads to the configured virtual COM pair.
     o.sharedApproved=true; // Explicit single full-duplex scanner-server topology; all RX bytes are forwarded.
     o.bridge=upperCom(text(COM_BRIDGE));o.application=upperCom(text(COM_APP));o.baud=(DWORD)_wtoi(text(COM_BAUD).c_str());
     o.bits=(BYTE)_wtoi(text(COM_BITS).c_str());LRESULT parity=SendMessageW(GetDlgItem(window,COM_PARITY),CB_GETCURSEL,0,0);
@@ -333,7 +333,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=instance;wc.lpszClassName=L"SR5000TcpComOperator";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);applicationIcon=LoadIconW(instance,MAKEINTRESOURCEW(201));wc.hIcon=applicationIcon;RegisterClassW(&wc);
     RECT work={};SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);HDC dc=GetDC(nullptr);double density=GetDeviceCaps(dc,LOGPIXELSX)/96.0;ReleaseDC(nullptr,dc);double ratio=(std::min)(1.5,(std::min)(density,(std::min)((work.right-work.left-24)/980.0,(work.bottom-work.top-24)/700.0)));if(ratio<.65)ratio=.65;
     DWORD style=WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;RECT size={0,0,(int)(960*ratio),(int)(660*ratio)};AdjustWindowRect(&size,style,FALSE);int width=size.right-size.left,height=size.bottom-size.top;
-    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 扫码串口桥接 v1.2.1",style,work.left+(work.right-work.left-width)/2,work.top+(work.bottom-work.top-height)/2,width,height,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
+    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 扫码串口桥接 v1.2.2",style,work.left+(work.right-work.left-width)/2,work.top+(work.bottom-work.top-height)/2,width,height,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
     RAWINPUTDEVICE rid={};rid.usUsagePage=1;rid.usUsage=6;rid.dwFlags=RIDEV_INPUTSINK;rid.hwndTarget=h;rawRegistered=RegisterRawInputDevices(&rid,1,sizeof(rid))!=FALSE;
     if(!rawRegistered){EnableWindow(GetDlgItem(h,HOTKEY),FALSE);engine.info(L"按键",L"后台键盘监听注册失败，Windows错误 "+std::to_wstring(GetLastError()));}
     taskbarRestartMessage=RegisterWindowMessageW(L"TaskbarCreated");addTray();ShowWindow(h,startupPrefs.hidden&&trayInstalled?SW_HIDE:SW_SHOW);PostMessageW(h,WM_STARTUP_BEGIN,0,0);

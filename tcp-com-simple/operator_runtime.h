@@ -15,7 +15,7 @@ const wchar_t* startupKeyForUI(){
 std::wstring preferencePath(){return directory+L"\\startup.ini";}
 Settings currentFormSettings(){Settings c;c.ip=text(IP);c.receivePort=portNumber(text(RXPORT));c.sendPort=c.receivePort;c.serial=serialFromUI();return c;}
 Settings savedFormSettings(){
-    Settings c;c.ip=ini(L"ReaderIp");c.receivePort=portNumber(communicationPortText());c.sendPort=c.receivePort;c.serial.sharedApproved=true;c.serial.enabled=serialIni(L"Enabled",L"0")==L"1";
+    Settings c;c.ip=ini(L"ReaderIp");c.receivePort=portNumber(communicationPortText());c.sendPort=c.receivePort;c.serial.sharedApproved=true;c.serial.enabled=true;
     c.serial.bridge=upperCom(serialIni(L"BridgeCom"));c.serial.application=upperCom(serialIni(L"ApplicationCom"));c.serial.baud=(DWORD)_wtoi(serialIni(L"Baud",L"9600").c_str());c.serial.bits=(BYTE)_wtoi(serialIni(L"Bits",L"8").c_str());c.serial.parity=(BYTE)_wtoi(serialIni(L"Parity",L"0").c_str());c.serial.stopBits=(BYTE)_wtoi(serialIni(L"StopBits",L"0").c_str());return c;
 }
 void cancelStartup(){KillTimer(window,2);startupPending=false;}
@@ -35,7 +35,7 @@ void removeTray(){if(trayInstalled){NOTIFYICONDATAW data={};data.cbSize=sizeof(d
 void showTrayMenu(){HMENU menu=CreatePopupMenu();AppendMenuW(menu,MF_STRING,6001,L"显示主界面");AppendMenuW(menu,MF_STRING,6002,L"断开连接");AppendMenuW(menu,MF_SEPARATOR,0,nullptr);AppendMenuW(menu,MF_STRING,6003,L"退出程序");POINT p;GetCursorPos(&p);SetForegroundWindow(window);UINT command=(UINT)TrackPopupMenu(menu,TPM_RETURNCMD|TPM_RIGHTBUTTON,p.x,p.y,0,window,nullptr);DestroyMenu(menu);if(command==6001)restoreMainWindow();else if(command==6002)SendMessageW(window,WM_COMMAND,DISCONNECT,0);else if(command==6003)PostMessageW(window,WM_CLOSE,0,0);}
 void updateDashboard(){
     set(UI_RX,engine.receiveOnline&&engine.sendOnline?L"已连接":L"未连接");
-    set(UI_COM,engine.serialFault?L"故障锁定":(engine.serialPeer?L"软件端就绪":(engine.serialEnabled?L"等待软件端":L"未启用")));
+    set(UI_COM,engine.serialFault?L"故障锁定":(engine.serialPeer?L"软件端就绪":(engine.serialEnabled?L"等待软件端":L"待连接")));
     set(UI_RX_BYTES,L"RX  "+std::to_wstring(engine.rxBytes.load())+L" B");set(UI_TX_BYTES,L"TX  "+std::to_wstring(engine.txBytes.load())+L" B");set(UI_COM_BYTES,L"COM  "+std::to_wstring(engine.serialBytes.load())+L" B");refreshTray();
 }
 void runStartupOnce(){
@@ -94,7 +94,6 @@ void createOperatorControls(HWND h){
     HWND mode=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,146,360,90,150,ENCODING);for(const wchar_t* name:{L"ASCII",L"HEX"})SendMessageW(mode,CB_ADDSTRING,0,(LPARAM)name);hexMode=ini(L"Encoding",L"HEX")!=L"ASCII";SendMessageW(mode,CB_SETCURSEL,hexMode?1:0,0);
     HWND payload=control(L"EDIT",L"",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,250,360,194,30,PAYLOAD);SendMessageW(payload,EM_SETLIMITTEXT,512,0);Bytes bytes;if(tcpcodecs::hex(ini(L"TriggerHex"),bytes))set(PAYLOAD,hexMode?tcpcodecs::formatHex(bytes):tcpcodecs::formatAscii(bytes));
     control(L"BUTTON",L"后台按键触发",BS_AUTOCHECKBOX|WS_TABSTOP,44,402,196,28,HOTKEY);HWND keys=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,262,399,182,230,KEY);for(const wchar_t* name:{L"Enter",L"Space"})SendMessageW(keys,CB_ADDSTRING,0,(LPARAM)name);for(int i=1;i<=12;++i){std::wstring name=L"F"+std::to_wstring(i);SendMessageW(keys,CB_ADDSTRING,0,(LPARAM)name.c_str());}LRESULT keyIndex=SendMessageW(keys,CB_FINDSTRINGEXACT,(WPARAM)-1,(LPARAM)ini(L"TriggerKey",L"Enter").c_str());SendMessageW(keys,CB_SETCURSEL,keyIndex==CB_ERR?0:keyIndex,0);
-    control(L"BUTTON",L"启用转发",BS_AUTOCHECKBOX|WS_TABSTOP,632,240,100,26,COM_ENABLE);SendMessageW(GetDlgItem(h,COM_ENABLE),BM_SETCHECK,serialIni(L"Enabled",L"0")==L"1"?BST_CHECKED:BST_UNCHECKED,0);
     control(L"BUTTON",L"刷新",WS_TABSTOP,734,238,64,28,COM_REFRESH);control(L"BUTTON",L"配对设置",WS_TABSTOP,808,238,108,28,COM_PAIR);
     control(L"COMBOBOX",L"",CBS_DROPDOWN|WS_VSCROLL|WS_TABSTOP,590,276,106,180,COM_BRIDGE);control(L"COMBOBOX",L"",CBS_DROPDOWN|WS_VSCROLL|WS_TABSTOP,800,276,116,180,COM_APP);set(COM_BRIDGE,serialIni(L"BridgeCom"));set(COM_APP,serialIni(L"ApplicationCom"));
     HWND baud=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,512,343,112,200,COM_BAUD);for(const wchar_t* v:{L"1200",L"2400",L"4800",L"9600",L"19200",L"38400",L"57600",L"115200"})SendMessageW(baud,CB_ADDSTRING,0,(LPARAM)v);LRESULT bi=SendMessageW(baud,CB_FINDSTRINGEXACT,(WPARAM)-1,(LPARAM)serialIni(L"Baud",L"9600").c_str());SendMessageW(baud,CB_SETCURSEL,bi==CB_ERR?3:bi,0);
@@ -103,5 +102,5 @@ void createOperatorControls(HWND h){
     HWND stop=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,842,343,74,110,COM_STOP);for(const wchar_t* v:{L"1",L"2"})SendMessageW(stop,CB_ADDSTRING,0,(LPARAM)v);SendMessageW(stop,CB_SETCURSEL,serialIni(L"StopBits",L"0")==L"2"?1:0,0);
     control(L"BUTTON",L"保存并连接",WS_TABSTOP,24,464,176,36,CONNECT);control(L"BUTTON",L"断开",WS_TABSTOP,214,464,100,36,DISCONNECT);control(L"BUTTON",L"发送触发",WS_TABSTOP,328,464,128,36,SEND);control(L"STATIC",L"最小化到托盘，关闭按钮退出",0,638,470,298,26,UI_TRAY_HINT);
     control(L"BUTTON",L"清空",WS_TABSTOP,840,516,76,28,CLEAR);HWND log=control(L"EDIT",L"",ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_TABSTOP,40,550,880,76,LOG);SendMessageW(log,WM_SETFONT,(WPARAM)operatorui::mono,TRUE);
-    refreshComs();SetTimer(h,1,100,nullptr);engine.info(L"状态",L"界面版v1.2.1：单一通讯端口全双工；启用串口时收到的数据原样转发（包括可能的设备应答）。自启动须由启动设置明确开启；不安装驱动，不自动发送指令。");refresh();
+    refreshComs();SetTimer(h,1,100,nullptr);engine.info(L"状态",L"界面版v1.2.2：单一通讯端口全双工；收到的数据原样转发（包括可能的设备应答）。自启动须由启动设置明确开启；不安装驱动，不自动发送指令。");refresh();
 }
