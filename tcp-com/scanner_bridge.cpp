@@ -311,7 +311,7 @@ LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
         control(L"STATIC",L"同端口须确认；不同端口应答不转COM",0,337,368,470,24,0);
         control(L"STATIC",L"未连接",0,16,405,790,85,STATE);
         control(L"EDIT",L"",WS_BORDER|ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_TABSTOP,16,500,790,152,LOG);
-        set(COM_BRIDGE,serialIni(L"BridgeCom"));set(COM_APP,serialIni(L"ApplicationCom"));refreshComs();SetTimer(h,1,50,nullptr);engine.info(L"状态",L"TCP+COM桥接 v1.1.1-field.1：保留v1.0.1回车修复。优先读取系统设备及驱动参数核验虚拟串口对，软件端打开后再触发。串口未启用时仍可只测TCP。不自动安装驱动/不设置自启。");refresh();return 0;}
+        set(COM_BRIDGE,serialIni(L"BridgeCom"));set(COM_APP,serialIni(L"ApplicationCom"));refreshComs();SetTimer(h,1,50,nullptr);engine.info(L"状态",L"TCP+COM桥接 v1.1.2-field.1：保留v1.0.1回车修复。优先读取系统设备及驱动参数核验虚拟串口对，软件端打开后再触发。串口未启用时仍可只测TCP。不自动安装驱动/不设置自启。");refresh();return 0;}
     if(m==WM_TIMER){pollPair();refresh();RECT indicatorArea={12,402,807,447};InvalidateRect(h,&indicatorArea,FALSE);return 0;}
     if(m==WM_PAINT){PAINTSTRUCT paint={};HDC dc=BeginPaint(h,&paint);for(int i=0;i<3;++i){bool online=i==0?engine.receiveOnline.load():(i==1?engine.sendOnline.load():engine.serialPeer&&!engine.serialFault);HBRUSH brush=CreateSolidBrush(online?RGB(0,145,80):RGB(192,0,0));HGDIOBJ old=SelectObject(dc,brush);HGDIOBJ pen=SelectObject(dc,GetStockObject(NULL_PEN));int x=i==1?315:16,y=i==2?430:408;Ellipse(dc,x,y,x+12,y+12);SelectObject(dc,pen);SelectObject(dc,old);DeleteObject(brush);}EndPaint(h,&paint);return 0;}
     if(m==WM_CTLCOLORSTATIC&&((HWND)l==GetDlgItem(h,STATE))&&engine.serialFault){SetTextColor((HDC)w,RGB(192,0,0));SetBkMode((HDC)w,TRANSPARENT);return (LRESULT)GetSysColorBrush(COLOR_BTNFACE);}
@@ -340,7 +340,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
     wchar_t exe[4096];GetModuleFileNameW(nullptr,exe,4096);directory=exe;directory=directory.substr(0,directory.find_last_of(L"\\/"));configPath=directory+L"\\tcp.ini";
     WSADATA wsa={};if(WSAStartup(MAKEWORD(2,2),&wsa)){CloseHandle(single);return 1;}
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=instance;wc.lpszClassName=L"SR5000TcpComWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=LoadIconW(nullptr,IDI_APPLICATION);wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);RegisterClassW(&wc);
-    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 TCP → COM 桥接 v1.1.1-field.1",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,850,715,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
+    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 TCP → COM 桥接 v1.1.2-field.1",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,850,715,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
     RAWINPUTDEVICE rid={};rid.usUsagePage=1;rid.usUsage=6;rid.dwFlags=RIDEV_INPUTSINK;rid.hwndTarget=h;
     if(!RegisterRawInputDevices(&rid,1,sizeof(rid))){EnableWindow(GetDlgItem(h,HOTKEY),FALSE);engine.info(L"按键",L"后台键盘注册失败，Windows错误 "+std::to_wstring(GetLastError())+L"；仍可用按钮收发TCP");}else engine.info(L"按键",L"后台键盘监听已注册（v1.0.1：兼容40字节键盘报文），勾选后可用");
     ShowWindow(h,SW_SHOW);MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){if(msg.message==WM_INPUT||!IsDialogMessageW(h,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}

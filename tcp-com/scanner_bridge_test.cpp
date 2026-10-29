@@ -126,6 +126,28 @@ void serialSplitAndFaults(){
 }
 
 
+void unrelatedUnassignedPairMustNotBlockRelay(){
+    // Configuration-only transcription of the field screenshot; no production IP.
+    const std::string listing=
+        "CNCA2 PortName=COM#,EmuBR=no,EmuOverrun=no,dsr=rdtr\n"
+        "CNCB2 PortName=COM#,EmuBR=no,EmuOverrun=no,dsr=rdtr\n"
+        "CNCA0 PortName=COM9,EmuBR=yes,EmuOverrun=yes,dsr=rdtr\n"
+        "CNCB0 PortName=COM10,EmuBR=yes,EmuOverrun=yes,dsr=rdtr\n"
+        "CNCA1 PortName=COM#,RealPortName=COM7,EmuBR=no,EmuOverrun=yes,dsr=rdtr\n"
+        "CNCB1 PortName=COM#,RealPortName=COM8,EmuBR=yes,EmuOverrun=no,dsr=ropen\n";
+    com0com::Inventory inventory;std::string error;CHECK(com0com::ParseInventory(listing,inventory,error));
+    CHECK(inventory.endpoints.size()==6&&inventory.endpoints[0].portName=="CNCA2"&&inventory.endpoints[1].portName=="CNCB2");
+    CHECK(com0com::ValidatePair(inventory,"COM7","COM8").ok());CHECK(!com0com::ValidatePair(inventory,"COM7","COM9").identityVerified);CHECK(!com0com::ValidatePair(inventory,"COM11","COM12").identityVerified);
+    CHECK(!com0com::ParseInventory(listing+"CNCA3 PortName=COM#,RealPortName=COM7\n",inventory,error));
+    CHECK(!com0com::ParseInventory("CNCA2 PortName=COM#,RealPortName=COM00\n",inventory,error));
+    CHECK(!com0com::ParseInventory("CNCA2 PortName=COM#\nCNCA2 PortName=COM#\n",inventory,error));
+    SerialFixture fixture;serialbridge::testBackend.inventory=listing;Listener scanner;TcpEngine e;Settings c=withSerial(scanner.port,scanner.port);
+    CHECK(e.start(c));SOCKET peer=scanner.acceptOne();CHECK(waitOnline(e,true,true));CHECK(e.serialOpened&&e.serialPeer&&!e.serialFault);Sleep(20);
+    const Bytes barcode={'F','I','E','L','D','-','C','O','D','E',13,10};CHECK(send(peer,(const char*)barcode.data(),(int)barcode.size(),0)==(int)barcode.size());CHECK(waitCom(e,barcode.size()));CHECK(fixture.contents()==barcode);
+    CHECK(e.queue(Bytes({'L','O','N',13})));CHECK(readExactly(peer,4)==Bytes({'L','O','N',13}));e.stop();closesocket(peer);
+    puts("[TEST] field COM7/COM8 aliases + unrelated unresolved COM# pair -> actual TCP worker relay; no guessed COM aliases or cross-pair acceptance");
+}
+
 void nativeRegistryEvidence(){
     const std::wstring path=L"Software\\SR5000NativeTest_"+std::to_wstring(GetCurrentProcessId());HKEY parameters=nullptr,a=nullptr,b=nullptr;
     CHECK(RegCreateKeyExW(HKEY_CURRENT_USER,path.c_str(),0,nullptr,0,KEY_READ|KEY_WRITE,nullptr,&parameters,nullptr)==ERROR_SUCCESS);
@@ -179,6 +201,6 @@ int main(){
     std::wstring nativeId;CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com11)",nativeId)&&nativeId==L"CNCA1");CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com21)",nativeId)&&nativeId==L"CNCB1");CHECK(!com0com::EndpointIdFromTarget(LR"(\Device\Serial0)",nativeId));
     com0com::CaptureResult diagnostic;diagnostic.status=com0com::CaptureStatus::ParseError;diagnostic.exitCode=0;diagnostic.error="malformed parameter";diagnostic.output="CNCA1 PortName=COM7,dsr=";
     std::wstring message=com0com::DescribeCaptureFailure(diagnostic);CHECK(message.find(L"解析")!=std::wstring::npos&&message.find(L"740")==std::wstring::npos&&message.find(L"malformed parameter")!=std::wstring::npos);
-    WSADATA w={};CHECK(WSAStartup(MAKEWORD(2,2),&w)==0);CHECK(!requiresCom());CHECK(!validSettings(Settings{}));puts("[TEST] UI");uiAndConfig();puts("[TEST] shared TCP");shared();puts("[TEST] split TCP");separate();puts("[TEST] independent failure");independentFailure();puts("[TEST] COM shared");serialShared();puts("[TEST] COM split faults");serialSplitAndFaults();puts("[TEST] COM-enabled GUI Enter -> TCP -> serial; persistence");uiComRoundtrip();nativeRegistryEvidence();engine.stop();WSACleanup();
+    WSADATA w={};CHECK(WSAStartup(MAKEWORD(2,2),&w)==0);CHECK(!requiresCom());CHECK(!validSettings(Settings{}));puts("[TEST] UI");uiAndConfig();puts("[TEST] shared TCP");shared();puts("[TEST] split TCP");separate();puts("[TEST] independent failure");independentFailure();puts("[TEST] COM shared");serialShared();puts("[TEST] COM split faults");serialSplitAndFaults();puts("[TEST] COM-enabled GUI Enter -> TCP -> serial; persistence");uiComRoundtrip();unrelatedUnassignedPairMustNotBlockRelay();nativeRegistryEvidence();engine.stop();WSACleanup();
     puts("PASS: COM optional; actual TCP worker -> explicit fake serial file, binary/fragmented unsolicited forwarding, shared ACK consent, split ACK excluded, command-failure RX relay, peer close fault latch, failed write latch, fresh pair recheck on reconnect, no old-code replay; no real driver installed. Original TCP/hotkey tests: actual shared/split engine, unsolicited binary RX, exact ASCII/HEX TX, separate ACK channel, independent channel failure, disconnect/no replay, selector conversion, 256-byte roundtrips, atomic config lock failure, hotkey initially off, Win64 exact40-byte raw keyboard -> real network trigger, repeat suppression, key-up/new press, stale/off/own-window/mouse rejection");
 }

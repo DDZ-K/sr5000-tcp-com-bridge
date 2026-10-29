@@ -66,8 +66,14 @@ inline bool ParseInventory(const std::string& text, Inventory& out, std::string&
         if (n==ep.parameters.end()) { error="missing PortName"; return false; }
         const auto real=ep.parameters.find("realportname");
         if (n->second=="COM#") {
-            if (real==ep.parameters.end() || !IsCanonicalCom(real->second)) { error="COM# lacks canonical RealPortName"; return false; }
-            ep.portName=real->second;
+            // An installed but not yet assigned Ports-class endpoint legitimately
+            // has no RealPortName. Retain its canonical driver identity, never
+            // invent a COM alias and never let it match a selected numeric COM.
+            if (real==ep.parameters.end()) ep.portName=ep.id;
+            else {
+                if (!IsCanonicalCom(real->second)) { error="COM# has invalid RealPortName"; return false; }
+                ep.portName=real->second;
+            }
         } else {
             if (real!=ep.parameters.end()) { error="ambiguous RealPortName"; return false; }
             ep.portName=n->second=="-"?ep.id:n->second;
