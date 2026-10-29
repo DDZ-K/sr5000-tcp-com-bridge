@@ -41,7 +41,7 @@ void updateDashboard(){
 void runStartupOnce(){
     if(startupConsumed||!startupPending)return;startupConsumed=true;cancelStartup();
     if(!startupPrefs.connect)return;
-    if(pairProcess||pairLaunching||pairBlocked||!validSettings(startupSnapshot)){engine.info(L"启动",L"自动连接未执行：保存的IP、通讯端口或串口参数无效。请检查配置后手动连接。");restoreMainWindow();refresh();return;}
+    if(pairProcess||pairLaunching||pairBlocked||driverBusy()||!validSettings(startupSnapshot)){engine.info(L"启动",L"自动连接未执行：保存的IP、通讯端口或串口参数无效。请检查配置后手动连接。");restoreMainWindow();refresh();return;}
     engine.start(startupSnapshot);hotkeyBoundary=GetTickCount();keyDown=false;engine.info(L"启动",L"已按保存配置尝试连接一次；没有发送触发、没有重放旧扫码数据，失败后不自动循环重连。");refresh();
 }
 void beginStartup(){
@@ -94,7 +94,7 @@ void createOperatorControls(HWND h){
     HWND mode=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,146,360,90,150,ENCODING);for(const wchar_t* name:{L"ASCII",L"HEX"})SendMessageW(mode,CB_ADDSTRING,0,(LPARAM)name);hexMode=ini(L"Encoding",L"HEX")!=L"ASCII";SendMessageW(mode,CB_SETCURSEL,hexMode?1:0,0);
     HWND payload=control(L"EDIT",L"",WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,250,360,194,30,PAYLOAD);SendMessageW(payload,EM_SETLIMITTEXT,512,0);Bytes bytes;if(tcpcodecs::hex(ini(L"TriggerHex"),bytes))set(PAYLOAD,hexMode?tcpcodecs::formatHex(bytes):tcpcodecs::formatAscii(bytes));
     control(L"BUTTON",L"后台按键触发",BS_AUTOCHECKBOX|WS_TABSTOP,44,402,196,28,HOTKEY);HWND keys=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,262,399,182,230,KEY);for(const wchar_t* name:{L"Enter",L"Space"})SendMessageW(keys,CB_ADDSTRING,0,(LPARAM)name);for(int i=1;i<=12;++i){std::wstring name=L"F"+std::to_wstring(i);SendMessageW(keys,CB_ADDSTRING,0,(LPARAM)name.c_str());}LRESULT keyIndex=SendMessageW(keys,CB_FINDSTRINGEXACT,(WPARAM)-1,(LPARAM)ini(L"TriggerKey",L"Enter").c_str());SendMessageW(keys,CB_SETCURSEL,keyIndex==CB_ERR?0:keyIndex,0);
-    control(L"BUTTON",L"刷新",WS_TABSTOP,734,238,64,28,COM_REFRESH);control(L"BUTTON",L"配对设置",WS_TABSTOP,808,238,108,28,COM_PAIR);
+    control(L"BUTTON",L"创建虚拟串口",WS_TABSTOP,620,238,142,28,311);control(L"BUTTON",L"刷新",WS_TABSTOP,772,238,58,28,COM_REFRESH);control(L"BUTTON",L"配对设置",WS_TABSTOP,840,238,76,28,COM_PAIR);
     control(L"COMBOBOX",L"",CBS_DROPDOWN|WS_VSCROLL|WS_TABSTOP,590,276,106,180,COM_BRIDGE);control(L"COMBOBOX",L"",CBS_DROPDOWN|WS_VSCROLL|WS_TABSTOP,800,276,116,180,COM_APP);set(COM_BRIDGE,serialIni(L"BridgeCom"));set(COM_APP,serialIni(L"ApplicationCom"));
     HWND baud=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,512,343,112,200,COM_BAUD);for(const wchar_t* v:{L"1200",L"2400",L"4800",L"9600",L"19200",L"38400",L"57600",L"115200"})SendMessageW(baud,CB_ADDSTRING,0,(LPARAM)v);LRESULT bi=SendMessageW(baud,CB_FINDSTRINGEXACT,(WPARAM)-1,(LPARAM)serialIni(L"Baud",L"9600").c_str());SendMessageW(baud,CB_SETCURSEL,bi==CB_ERR?3:bi,0);
     HWND bits=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,638,343,62,130,COM_BITS);for(const wchar_t* v:{L"5",L"6",L"7",L"8"})SendMessageW(bits,CB_ADDSTRING,0,(LPARAM)v);SendMessageW(bits,CB_SETCURSEL,_wtoi(serialIni(L"Bits",L"8").c_str())-5,0);
@@ -102,5 +102,5 @@ void createOperatorControls(HWND h){
     HWND stop=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP,842,343,74,110,COM_STOP);for(const wchar_t* v:{L"1",L"2"})SendMessageW(stop,CB_ADDSTRING,0,(LPARAM)v);SendMessageW(stop,CB_SETCURSEL,serialIni(L"StopBits",L"0")==L"2"?1:0,0);
     control(L"BUTTON",L"保存并连接",WS_TABSTOP,24,464,176,36,CONNECT);control(L"BUTTON",L"断开",WS_TABSTOP,214,464,100,36,DISCONNECT);control(L"BUTTON",L"发送触发",WS_TABSTOP,328,464,128,36,SEND);control(L"STATIC",L"最小化到托盘，关闭按钮退出",0,638,470,298,26,UI_TRAY_HINT);
     control(L"BUTTON",L"清空",WS_TABSTOP,840,516,76,28,CLEAR);HWND log=control(L"EDIT",L"",ES_MULTILINE|ES_AUTOVSCROLL|ES_READONLY|WS_VSCROLL|WS_TABSTOP,40,550,880,76,LOG);SendMessageW(log,WM_SETFONT,(WPARAM)operatorui::mono,TRUE);
-    refreshComs();SetTimer(h,1,100,nullptr);engine.info(L"状态",L"界面版v1.2.2：单一通讯端口全双工；收到的数据原样转发（包括可能的设备应答）。自启动须由启动设置明确开启；不安装驱动，不自动发送指令。");refresh();
+    refreshComs();SetTimer(h,1,100,nullptr);engine.info(L"状态",L"界面版v1.3.0-field.1：单一通讯端口全双工；收到的数据原样转发（包括可能的设备应答）。自启动须由启动设置明确开启；不安装驱动，不自动发送指令。");refresh();
 }

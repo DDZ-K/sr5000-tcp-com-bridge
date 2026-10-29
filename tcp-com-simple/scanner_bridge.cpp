@@ -18,6 +18,7 @@
 #include "serial_forward.h"
 #include "startup_settings.h"
 #include "operator_ui.h"
+#include "preparation_security.h"
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"user32.lib")
 #pragma comment(lib,"gdi32.lib")
@@ -124,6 +125,8 @@ public:
 TcpEngine engine;
 const UINT IP=101,RXPORT=102,TXPORT=103,ENCODING=104,PAYLOAD=105,KEY=106,CONNECT=201,DISCONNECT=202,SEND=203,CLEAR=204,HOTKEY=205,STATE=206,LOG=207,COM_ENABLE=301,COM_BRIDGE=302,COM_APP=303,COM_BAUD=304,COM_BITS=305,COM_PARITY=306,COM_STOP=307,COM_REFRESH=308,COM_PAIR=309,COM_SHARED=310,UI_SETTINGS=401,UI_RX=410,UI_TX=411,UI_COM=412,UI_RX_BYTES=413,UI_TX_BYTES=414,UI_COM_BYTES=415,UI_TRAY_HINT=416;
 HWND window=nullptr;HFONT font=nullptr;bool hexMode=true,keyDown=false;std::wstring directory,configPath;DWORD hotkeyBoundary=0;HANDLE pairProcess=nullptr;ULONGLONG pairStarted=0;bool pairWarned=false,pairLaunching=false,pairBlocked=false;std::deque<std::wstring> pairCommands;SerialOptions pairOptions;std::wstring pairSetup;
+HANDLE driverProcess=nullptr;ULONGLONG driverStarted=0;bool driverLaunching=false,driverBlocked=false,driverWarned=false;
+bool driverBusy(){return driverProcess||driverLaunching||driverBlocked;}
 std::wstring text(UINT id){int n=GetWindowTextLengthW(GetDlgItem(window,(int)id));if(n>1024)n=1024;std::vector<wchar_t> b((size_t)n+1);GetWindowTextW(GetDlgItem(window,(int)id),b.data(),n+1);return b.data();}
 void set(UINT id,const std::wstring& s){if(text(id)!=s)SetWindowTextW(GetDlgItem(window,(int)id),s.c_str());}
 void updateDashboard();void cancelStartup();
@@ -190,7 +193,7 @@ bool persist(const Settings& c,const Bytes& bytes){
 }
 void connectClicked(){
     cancelStartup();
-    if(pairProcess||pairLaunching||pairBlocked){engine.info(L"拒绝",L"串口配对设置尚未结束，不允许重连");refresh();return;}
+    if(pairProcess||pairLaunching||pairBlocked||driverBusy()){engine.info(L"拒绝",L"串口配对设置尚未结束，不允许重连");refresh();return;}
     Settings c;c.ip=text(IP);c.receivePort=portNumber(text(RXPORT));c.sendPort=c.receivePort;c.serial=serialFromUI();Bytes bytes;
     if(!validSerialOptions(c.serial)){MessageBoxW(window,L"串口启用时，两个COM必须有效且不同，串口参数须与目标软件一致。",L"串口参数无效",MB_ICONERROR);return;}
 
@@ -199,10 +202,21 @@ void connectClicked(){
     if(!persist(c,bytes)){MessageBoxW(window,L"配置保存失败，未改变当前连接；请把文件夹放在可写位置。",L"保存失败",MB_ICONERROR);return;}
     engine.start(c);hotkeyBoundary=GetTickCount();keyDown=false;engine.info(L"配置",L"已保存并开始连接；不会自动发送触发指令");refresh();
 }
-bool comExists(const std::wstring& name){wchar_t target[4096];return QueryDosDeviceW(name.c_str(),target,4096)!=0;}
+bool preparationCreating=false;
+void preparationPairResult(bool ok,const std::wstring& error);
+std::wstring preparationSetup();
+bool comExists(const std::wstring& name){
+#ifdef TCP_TESTER_TEST
+    if(preparationSimulation.active)return std::find(preparationSimulation.existing.begin(),preparationSimulation.existing.end(),name)!=preparationSimulation.existing.end();
+#endif
+    wchar_t target[4096];return QueryDosDeviceW(name.c_str(),target,4096)!=0;
+}
 bool namesFree(const SerialOptions& o,std::wstring& error){
     if(!serialbridge::comName(o.bridge)||!serialbridge::comName(o.application)||o.bridge==o.application){error=L"请填写两个不同的规范COM号";return false;}
     if(comExists(o.bridge)||comExists(o.application)){error=L"所选COM已存在，禁止创建覆盖";return false;}
+#ifdef TCP_TESTER_TEST
+    if(preparationSimulation.active){if(!preparationSimulation.arbiterValid){error=L"模拟COM保留证据不可读";return false;}for(const auto& name:preparationSimulation.reserved)if(name==o.bridge||name==o.application){error=name+L" 已保留，不能覆盖";return false;}return true;}
+#endif
     HKEY key=nullptr;LONG rc=RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SYSTEM\\CurrentControlSet\\Control\\COM Name Arbiter",0,KEY_QUERY_VALUE|KEY_WOW64_64KEY,&key);
     if(rc!=ERROR_SUCCESS){error=L"无法只读检查系统COM保留表，禁止自动创建";return false;}
     DWORD type=0,size=0;rc=RegQueryValueExW(key,L"ComDB",nullptr,&type,nullptr,&size);
@@ -217,12 +231,14 @@ bool testPairLaunch=false,testPairLaunchResult=false,testPairTrust=false;
 #endif
 bool startPairProcess(SHELLEXECUTEINFOW& info){
 #ifdef TCP_TESTER_TEST
+    if(preparationSimulation.active){++preparationSimulation.launches;preparationSimulation.launchedPath=info.lpFile;preparationSimulation.launchedArguments=info.lpParameters?info.lpParameters:L"";info.hProcess=preparationSimulation.child;return preparationSimulation.launch;}
     if(testPairLaunch){if(!testPairLaunchResult)SetLastError(ERROR_CANCELLED);return testPairLaunchResult;}
 #endif
     return ShellExecuteExW(&info)!=FALSE;
 }
 bool pairPathTrusted(){
 #ifdef TCP_TESTER_TEST
+    if(preparationSimulation.active)return pairSetup==preparationSimulation.setup&&!pairSetup.empty();
     if(testPairLaunch)return testPairTrust;
 #endif
     return !pairSetup.empty()&&serialbridge::findSetupc()==pairSetup;
@@ -243,14 +259,24 @@ bool launchPairCommand(){
 void pollPair(){
     if(!pairProcess)return;DWORD wait=WaitForSingleObject(pairProcess,0);
     if(wait==WAIT_TIMEOUT){if(!pairWarned&&GetTickCount64()-pairStarted>30000){pairWarned=true;engine.info(L"配对设置",L"设置仍在运行；界面保持响应，但禁止重复创建。请检查安装窗口，不强杀驱动进程。");}return;}
-    DWORD exitCode=999;bool exited=wait==WAIT_OBJECT_0&&GetExitCodeProcess(pairProcess,&exitCode);CloseHandle(pairProcess);pairProcess=nullptr;
-    if(!exited||exitCode!=0){pairCommands.clear();engine.info(L"配对设置",L"设置未验证成功，退出码 "+std::to_wstring(exitCode)+L"；部分设置可能已生效，请检查库存。未自动连接。");}
+    DWORD exitCode=999;bool exited=wait==WAIT_OBJECT_0&&GetExitCodeProcess(pairProcess,&exitCode);
+#ifdef TCP_TESTER_TEST
+    if(preparationSimulation.active&&wait==WAIT_OBJECT_0){exited=true;exitCode=0;}
+#endif
+    CloseHandle(pairProcess);pairProcess=nullptr;
+    if(!exited||exitCode!=0){pairCommands.clear();engine.info(L"配对设置",L"设置未验证成功，退出码 "+std::to_wstring(exitCode)+L"；部分设置可能已生效，请检查库存。未自动连接。");if(preparationCreating)preparationPairResult(false,L"设置进程未成功，退出码 "+std::to_wstring(exitCode));}
     else if(!pairCommands.empty()){launchPairCommand();return;}
-    else{std::wstring error;bool ok=serialbridge::inspectPair(pairOptions,error);engine.info(L"配对设置",ok?L"库存已核验：同一对COM且映射设置正确。还需目标电脑真实收发测试；请先打开软件端，再点击保存并连接。":L"进程结束，但配对检查失败："+error);}
+    else{std::wstring error;bool ok=serialbridge::inspectPair(pairOptions,error);engine.info(L"配对设置",ok?L"库存已核验：同一对COM且映射设置正确。还需目标电脑真实收发测试；请先打开软件端，再点击保存并连接。":L"进程结束，但配对检查失败："+error);if(preparationCreating)preparationPairResult(ok,error);}
     EnableWindow(GetDlgItem(window,COM_PAIR),TRUE);EnableWindow(GetDlgItem(window,CONNECT),TRUE);refreshComs();
 }
+bool newPairCommand(const SerialOptions& o,const std::wstring& setup,std::wstring& parameters,std::wstring& error){
+    if(!namesFree(o,error))return false;
+    com0com::AdminCreateCommand command;std::string detail;
+    if(!com0com::BuildAdminCreateCommand(setup,serialbridge::narrow(o.application),serialbridge::narrow(o.bridge),command,detail)){error=L"创建参数拒绝："+serialbridge::wide(detail);return false;}
+    parameters=command.parameters;return true;
+}
 void pairClicked(){
-    if(pairProcess||pairLaunching||pairBlocked){engine.info(L"配对设置",L"设置尚未结束，不能重复运行");return;}
+    if(pairProcess||pairLaunching||pairBlocked||driverBusy()){engine.info(L"配对设置",L"设置尚未结束，不能重复运行");return;}
     if(engine.running||engine.serialOpened||engine.receiveOnline||engine.sendOnline){MessageBoxW(window,L"请先点击“断开”，并关闭目标软件所选串口，再进行配对设置；不在生产收发中修改驱动。",L"请先停止连接",MB_ICONWARNING);return;}
     SerialOptions o=serialFromUI();o.enabled=true;if(!validSerialOptions(o)){MessageBoxW(window,L"请填写两个不同的COM号，并核对参数。",L"COM设置无效",MB_ICONWARNING);return;}
     std::wstring setup=serialbridge::findSetupc();if(setup.empty()){MessageBoxW(window,L"尚未找到受管理员保护的com0com/setupc.exe。先安装包内 drivers/win7-x64 驱动（仅Win7 x64），或使用已经获批的适配驱动。不要在Win10/11盲装Win7驱动，不关闭签名/安全启动。已有COM请先核验，勿重复安装。",L"需要虚拟串口驱动",MB_ICONWARNING);return;}
@@ -270,7 +296,7 @@ void pairClicked(){
         std::wstring prompt=L"将创建新虚拟串口对：软件端 "+o.application+L" ↔ 桥接端 "+o.bridge+L"。不覆盖已存在或保留的COM，需系统管理员授权。继续吗？";
         if(MessageBoxW(window,prompt.c_str(),L"确认创建虚拟串口",MB_YESNO|MB_ICONWARNING|MB_DEFBUTTON2)!=IDYES)return;
         if(!namesFree(o,error)){engine.info(L"配对设置",error);return;}
-        com0com::AdminCreateCommand command;std::string detail;if(!com0com::BuildAdminCreateCommand(setup,serialbridge::narrow(o.application),serialbridge::narrow(o.bridge),command,detail)){engine.info(L"配对设置",L"创建参数拒绝："+serialbridge::wide(detail));return;}pairCommands.push_back(command.parameters);
+        std::wstring parameters;if(!newPairCommand(o,setup,parameters,error)){engine.info(L"配对设置",error);return;}pairCommands.push_back(parameters);
     }
     engine.stop();pairOptions=o;pairSetup=setup;launchPairCommand();
 }
@@ -294,10 +320,11 @@ bool handleKeyboardPacket(const void* packet,UINT count,DWORD captured,DWORD for
     engine.info(L"按键",L"已捕获后台 "+text(KEY)+L"，提交当前触发内容");sendClicked();return true;
 }
 #include "operator_runtime.h"
+#include "virtual_com_preparation.h"
 LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
     if(m==WM_CREATE){window=h;createOperatorControls(h);return 0;}
     if(m==WM_STARTUP_BEGIN){beginStartup();return 0;}if(m==WM_STARTUP_CONNECT){runStartupOnce();return 0;}
-    if(m==WM_TIMER){if(w==2){runStartupOnce();return 0;}pollPair();refresh();RECT cards=operatorui::box(24,86,912,134);InvalidateRect(h,&cards,FALSE);return 0;}
+    if(m==WM_TIMER){if(w==2){runStartupOnce();return 0;}pollPreparationDriver();pollPair();refresh();RECT cards=operatorui::box(24,86,912,134);InvalidateRect(h,&cards,FALSE);return 0;}
     if(m==WM_SIZE&&w==SIZE_MINIMIZED&&trayInstalled){ShowWindow(h,SW_HIDE);return 0;}
     if(taskbarRestartMessage&&m==taskbarRestartMessage){trayInstalled=false;addTray();return 0;}
     if(m==WM_TRAY){if(l==WM_LBUTTONDBLCLK||l==WM_LBUTTONUP)restoreMainWindow();else if(l==WM_RBUTTONUP)showTrayMenu();return 0;}
@@ -306,7 +333,7 @@ LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
     if(m==WM_PAINT){PAINTSTRUCT paint={};HDC screen=BeginPaint(h,&paint);RECT r;GetClientRect(h,&r);HDC buffer=CreateCompatibleDC(screen);HBITMAP image=CreateCompatibleBitmap(screen,r.right,r.bottom);HGDIOBJ old=SelectObject(buffer,image);operatorui::paint(buffer,r.right,r.bottom,engine.serialFault);operatorui::dot(buffer,434,107,engine.receiveOnline&&engine.sendOnline?operatorui::Green:operatorui::Muted);operatorui::dot(buffer,902,107,engine.serialFault?operatorui::Red:(engine.serialPeer?operatorui::Green:operatorui::Muted));BitBlt(screen,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY);SelectObject(buffer,old);DeleteObject(image);DeleteDC(buffer);EndPaint(h,&paint);return 0;}
     if(m==WM_CTLCOLORSTATIC||m==WM_CTLCOLORBTN||m==WM_CTLCOLOREDIT){UINT id=(UINT)GetDlgCtrlID((HWND)l);COLORREF color=operatorui::Ink;if(id==UI_RX)color=engine.receiveOnline?operatorui::Green:operatorui::Muted;if(id==UI_TX)color=engine.sendOnline?operatorui::Green:operatorui::Muted;if(id==UI_COM)color=engine.serialFault?operatorui::Red:(engine.serialPeer?operatorui::Green:operatorui::Muted);if(id==STATE&&engine.serialFault)color=operatorui::Red;SetTextColor((HDC)w,color);COLORREF background=id==STATE?(engine.serialFault?RGB(255,242,242):RGB(235,240,248)):(id==UI_TRAY_HINT?operatorui::Background:operatorui::Paper);SetBkColor((HDC)w,background);SetDCBrushColor((HDC)w,background);return (LRESULT)GetStockObject(DC_BRUSH);}
     if(m==WM_COMMAND){UINT changed=LOWORD(w);bool editable=(changed>=IP&&changed<=KEY)||(changed>=COM_BRIDGE&&changed<=COM_STOP);bool toggle=(changed==COM_ENABLE||changed==COM_SHARED||changed==HOTKEY)&&HIWORD(w)==BN_CLICKED;if(startupPending&&((editable&&(HIWORD(w)==EN_CHANGE||HIWORD(w)==CBN_SELCHANGE))||toggle))cancelStartup();if(LOWORD(w)==KEY&&HIWORD(w)==CBN_SELCHANGE){hotkeyBoundary=GetTickCount();keyDown=false;return 0;}if(LOWORD(w)==ENCODING&&HIWORD(w)==CBN_SELCHANGE){convertEncoding(SendMessageW(GetDlgItem(h,ENCODING),CB_GETCURSEL,0,0)==1);return 0;}
-        switch(LOWORD(w)){case UI_SETTINGS:openPreferences();return 0;case COM_REFRESH:refreshComs();refresh();return 0;case COM_PAIR:pairClicked();refresh();return 0;case CONNECT:connectClicked();return 0;case DISCONNECT:cancelStartup();engine.stop();hotkeyBoundary=GetTickCount();engine.info(L"用户",L"已手动断开");refresh();return 0;case SEND:sendClicked();return 0;case CLEAR:set(LOG,L"");return 0;case HOTKEY:hotkeyBoundary=GetTickCount();keyDown=false;engine.info(L"按键",SendMessageW(GetDlgItem(h,HOTKEY),BM_GETCHECK,0,0)==BST_CHECKED?L"后台按键触发已开启；请切到其他窗口测试，原按键不会被吞掉":L"后台按键触发已关闭");refresh();return 0;}}
+        switch(LOWORD(w)){case COM_PREPARE:openPreparation();return 0;case UI_SETTINGS:openPreferences();return 0;case COM_REFRESH:refreshComs();refresh();return 0;case COM_PAIR:pairClicked();refresh();return 0;case CONNECT:connectClicked();return 0;case DISCONNECT:cancelStartup();engine.stop();hotkeyBoundary=GetTickCount();engine.info(L"用户",L"已手动断开");refresh();return 0;case SEND:sendClicked();return 0;case CLEAR:set(LOG,L"");return 0;case HOTKEY:hotkeyBoundary=GetTickCount();keyDown=false;engine.info(L"按键",SendMessageW(GetDlgItem(h,HOTKEY),BM_GETCHECK,0,0)==BST_CHECKED?L"后台按键触发已开启；请切到其他窗口测试，原按键不会被吞掉":L"后台按键触发已关闭");refresh();return 0;}}
     if(m==WM_INPUT){
         UINT size=0;
         if(GetRawInputData((HRAWINPUT)l,RID_INPUT,nullptr,&size,sizeof(RAWINPUTHEADER))==0&&keyboardPacketSize(size)){
@@ -319,7 +346,7 @@ LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
         }
         return DefWindowProcW(h,m,w,l);
     }
-    if(m==WM_CLOSE){if(pairProcess||pairLaunching){MessageBoxW(h,L"配对设置进程尚未结束，请先完成或取消系统安装窗口。不会强杀驱动设置。",L"请等待设置完成",MB_ICONWARNING);return 0;}DestroyWindow(h);return 0;}
+    if(m==WM_CLOSE){if(pairProcess||pairLaunching||driverProcess||driverLaunching){MessageBoxW(h,L"配对设置进程尚未结束，请先完成或取消系统安装窗口。不会强杀驱动设置。",L"请等待设置完成",MB_ICONWARNING);return 0;}DestroyWindow(h);return 0;}
     if(m==WM_DESTROY){KillTimer(h,1);KillTimer(h,2);removeTray();if(preferencesWindow)DestroyWindow(preferencesWindow);engine.stop();operatorui::release();font=nullptr;PostQuitMessage(0);return 0;}
     return DefWindowProcW(h,m,w,l);
 }
@@ -333,11 +360,11 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=instance;wc.lpszClassName=L"SR5000TcpComOperator";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);applicationIcon=LoadIconW(instance,MAKEINTRESOURCEW(201));wc.hIcon=applicationIcon;RegisterClassW(&wc);
     RECT work={};SystemParametersInfoW(SPI_GETWORKAREA,0,&work,0);HDC dc=GetDC(nullptr);double density=GetDeviceCaps(dc,LOGPIXELSX)/96.0;ReleaseDC(nullptr,dc);double ratio=(std::min)(1.5,(std::min)(density,(std::min)((work.right-work.left-24)/980.0,(work.bottom-work.top-24)/700.0)));if(ratio<.65)ratio=.65;
     DWORD style=WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX|WS_CLIPCHILDREN;RECT size={0,0,(int)(960*ratio),(int)(660*ratio)};AdjustWindowRect(&size,style,FALSE);int width=size.right-size.left,height=size.bottom-size.top;
-    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 扫码串口桥接 v1.2.2",style,work.left+(work.right-work.left-width)/2,work.top+(work.bottom-work.top-height)/2,width,height,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
+    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 扫码串口桥接 v1.3.0-field.1",style,work.left+(work.right-work.left-width)/2,work.top+(work.bottom-work.top-height)/2,width,height,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
     RAWINPUTDEVICE rid={};rid.usUsagePage=1;rid.usUsage=6;rid.dwFlags=RIDEV_INPUTSINK;rid.hwndTarget=h;rawRegistered=RegisterRawInputDevices(&rid,1,sizeof(rid))!=FALSE;
     if(!rawRegistered){EnableWindow(GetDlgItem(h,HOTKEY),FALSE);engine.info(L"按键",L"后台键盘监听注册失败，Windows错误 "+std::to_wstring(GetLastError()));}
     taskbarRestartMessage=RegisterWindowMessageW(L"TaskbarCreated");addTray();ShowWindow(h,startupPrefs.hidden&&trayInstalled?SW_HIDE:SW_SHOW);PostMessageW(h,WM_STARTUP_BEGIN,0,0);
-    MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){if(preferencesWindow&&IsDialogMessageW(preferencesWindow,&msg))continue;if(msg.message==WM_INPUT||!IsDialogMessageW(h,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
+    MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){if(preparationWindow&&IsDialogMessageW(preparationWindow,&msg))continue;if(preferencesWindow&&IsDialogMessageW(preferencesWindow,&msg))continue;if(msg.message==WM_INPUT||!IsDialogMessageW(h,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
     engine.stop();WSACleanup();CloseHandle(single);return 0;
 }
 #endif

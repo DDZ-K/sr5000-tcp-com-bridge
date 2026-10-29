@@ -1,4 +1,13 @@
 #define TCP_TESTER_TEST
+#define _WIN32_WINNT 0x0601
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <windows.h>
+#include <string>
+#include <vector>
+// Explicit simulation seam. No installer/device operation is permitted by these tests.
+struct PreparationSimulation{bool active=false,win7=false,confirm=false,verified=false,launch=false;std::wstring setup;HANDLE child=nullptr;unsigned launches=0;std::wstring launchedPath,launchedArguments;std::string inventory;bool arbiterValid=true;std::vector<std::wstring> existing,reserved;};
+PreparationSimulation preparationSimulation;
 #include "scanner_bridge.cpp"
 #include <cstdio>
 #include <cstdlib>
@@ -63,6 +72,65 @@ void uiAndConfig(){
     wchar_t base[MAX_PATH]={},folder[MAX_PATH]={};GetTempPathW(MAX_PATH,base);GetTempFileNameW(base,L"STC",0,folder);DeleteFileW(folder);CHECK(CreateDirectoryW(folder,nullptr));directory=folder;configPath=directory+L"\\tcp.ini";
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"TCPOnlyTestWindow";CHECK(RegisterClassW(&wc));
     HWND h=CreateWindowW(wc.lpszClassName,L"TCP test",WS_OVERLAPPED,0,0,850,650,nullptr,nullptr,wc.hInstance,nullptr);CHECK(h);CHECK(GetDlgItem(h,LOG));CHECK(GetDlgItem(h,SEND));CHECK(!GetDlgItem(h,110));CHECK(!GetDlgItem(h,TXPORT));CHECK(!GetDlgItem(h,COM_SHARED));CHECK(!GetDlgItem(h,UI_TX));CHECK(!GetDlgItem(h,COM_ENABLE));CHECK(serialFromUI().enabled);CHECK(savedFormSettings().serial.enabled);
+    CHECK(GetDlgItem(h,311)); // New independent virtual-COM preparation entry (must exist without installed ports).
+    SendMessageW(h,WM_COMMAND,311,0);
+    HWND preparation=FindWindowW(L"SR5000VirtualComPreparation",nullptr);CHECK(preparation);
+    CHECK(GetDlgItem(preparation,7001)&&GetDlgItem(preparation,7002)); // editable bridge/software COMs
+    CHECK(GetDlgItem(preparation,7003)&&GetDlgItem(preparation,7004)); // explicit install + create, never implicit
+    CHECK(!engine.running&&!pairProcess);
+    SendMessageW(preparation,WM_COMMAND,7005,0); // Real read-only driver discovery must produce actionable status.
+    CHECK(preparationText(7006).find(L"驱动")!=std::wstring::npos);
+    SendMessageW(preparation,WM_COMMAND,7003,0); // This development host is Win11: must refuse old Win7 driver, not launch UAC.
+    CHECK(preparationText(7006).find(L"仅支持 Windows 7 x64")!=std::wstring::npos);
+    preparationSimulation.active=true;preparationSimulation.win7=true;
+    SendMessageW(preparation,WM_COMMAND,7003,0);
+    CHECK(preparationText(7006).find(L"校验失败")!=std::wstring::npos&&preparationSimulation.launches==0);
+    preparationSimulation.verified=true;preparationSimulation.confirm=false;
+    SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(preparationText(7006).find(L"取消")!=std::wstring::npos&&preparationSimulation.launches==0);
+    preparationSimulation.confirm=true;preparationSimulation.launch=false;
+    SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(preparationText(7006).find(L"启动失败")!=std::wstring::npos&&preparationSimulation.launches==1);
+    preparationSimulation.launch=true;
+    preparationSimulation.child=CreateEventW(nullptr,TRUE,FALSE,nullptr);CHECK(preparationSimulation.child);
+    SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(preparationSimulation.launches==2);
+    CHECK(preparationSimulation.launchedArguments.empty());CHECK(preparationSimulation.launchedPath==directory+LR"(\drivers\win7-x64\Setup_com0com_v3.0.0.0_W7_x64_signed.exe)");
+    CHECK(!IsWindowEnabled(GetDlgItem(preparation,7003))&&!IsWindowEnabled(GetDlgItem(preparation,7004)));
+    SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(preparationSimulation.launches==2); // no reentry
+    SendMessageW(preparation,WM_CLOSE,0,0);CHECK(IsWindow(preparation)); // no killing/losing live install
+    driverStarted=GetTickCount64()-120001;SendMessageW(preparation,WM_TIMER,1,0);CHECK(driverWarned&&driverProcess&&!IsWindowEnabled(GetDlgItem(preparation,7003)));
+    SetEvent(preparationSimulation.child);SendMessageW(preparation,WM_TIMER,1,0);
+    CHECK(preparationText(7006).find(L"未发现可信setupc")!=std::wstring::npos); // exit alone never success
+    CHECK(IsWindowEnabled(GetDlgItem(preparation,7003))&&!engine.running);
+    preparationSimulation.child=nullptr;
+    SetWindowTextW(GetDlgItem(preparation,7001),L"COM8");SetWindowTextW(GetDlgItem(preparation,7002),L"COM7");
+    SendMessageW(preparation,WM_COMMAND,7004,0);CHECK(preparationText(7006).find(L"先安装")!=std::wstring::npos);
+    preparationSimulation.setup=L"C:\\Program Files\\com0com\\setupc.exe";preparationSimulation.inventory="CNCA0 PortName=COM1\nCNCB0 PortName=COM2\n";
+    preparationSimulation.reserved={L"COM7"};SendMessageW(preparation,WM_COMMAND,7004,0);
+    CHECK(preparationText(7006).find(L"保留")!=std::wstring::npos&&preparationSimulation.launches==2);
+    preparationSimulation.reserved.clear();preparationSimulation.child=CreateEventW(nullptr,TRUE,FALSE,nullptr);CHECK(preparationSimulation.child);
+    SendMessageW(preparation,WM_COMMAND,7004,0);CHECK(pairProcess&&preparationSimulation.launches==3);
+    CHECK(preparationSimulation.launchedArguments.find(L"install")!=std::wstring::npos);
+    CHECK(text(COM_BRIDGE)!=L"COM8"); // only fill after verified inventory, not merely successful launch
+    serialbridge::testBackend.inventory=goodInventory(); // explicit fake final device inventory
+    SetEvent(preparationSimulation.child);SendMessageW(preparation,WM_TIMER,1,0);
+    CHECK(!pairProcess&&text(COM_BRIDGE)==L"COM8"&&text(COM_APP)==L"COM7"&&!engine.running);
+    CHECK(preparationText(7006).find(L"已核验")!=std::wstring::npos);
+    preparationSimulation.existing={L"COM2"};preparationSimulation.reserved={L"COM1"};
+    SendMessageW(preparation,WM_COMMAND,7005,0);
+    CHECK(SendMessageW(GetDlgItem(preparation,7001),CB_GETCOUNT,0,0)>=2);
+    CHECK(SendMessageW(GetDlgItem(preparation,7001),CB_FINDSTRINGEXACT,(WPARAM)-1,(LPARAM)L"COM1")==CB_ERR);
+    CHECK(SendMessageW(GetDlgItem(preparation,7001),CB_FINDSTRINGEXACT,(WPARAM)-1,(LPARAM)L"COM2")==CB_ERR);
+    preparationSimulation.existing.clear();preparationSimulation.reserved.clear();
+    preparationSimulation.arbiterValid=false;SendMessageW(preparation,WM_COMMAND,7004,0);CHECK(!pairProcess&&preparationText(7006).find(L"保留")!=std::wstring::npos);
+    preparationSimulation.arbiterValid=true;preparationSimulation.existing={L"COM7"};SendMessageW(preparation,WM_COMMAND,7004,0);CHECK(!pairProcess&&preparationText(7006).find(L"已存在")!=std::wstring::npos);
+    preparationSimulation.existing.clear();SetWindowTextW(GetDlgItem(preparation,7001),L"COM7 & calc");SendMessageW(preparation,WM_COMMAND,7004,0);CHECK(!pairProcess&&preparationSimulation.launches==3);
+    SetWindowTextW(GetDlgItem(preparation,7001),L"COM8");preparationSimulation.confirm=false;SendMessageW(preparation,WM_COMMAND,7004,0);CHECK(preparationText(7006).find(L"取消")!=std::wstring::npos&&preparationSimulation.launches==3);
+    preparationSimulation.confirm=true;preparationSimulation.child=CreateEventW(nullptr,TRUE,FALSE,nullptr);CHECK(preparationSimulation.child);
+    serialbridge::testBackend.inventory="CNCA0 PortName=COM1\nCNCB0 PortName=COM2\n";
+    set(COM_BRIDGE,L"COM19");set(COM_APP,L"COM20");SendMessageW(preparation,WM_COMMAND,7004,0);CHECK(pairProcess);
+    SetEvent(preparationSimulation.child);SendMessageW(preparation,WM_TIMER,1,0);CHECK(!pairProcess&&preparationText(7006).find(L"未核验成功")!=std::wstring::npos&&text(COM_BRIDGE)==L"COM19"&&text(COM_APP)==L"COM20");serialbridge::testBackend.inventory=goodInventory();
+    preparationSimulation.child=nullptr;preparationSimulation.setup.clear();SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(driverBlocked&&!driverProcess&&!IsWindowEnabled(GetDlgItem(preparation,7004)));driverBlocked=false;preparationEnable();preparationSimulation.active=false;
+    CHECK(!engine.running&&!pairProcess);SendMessageW(preparation,WM_CLOSE,0,0);refresh();set(LOG,L"");
+    puts("[TEST] preparation GUI + Win11 refusal + explicit simulated Win7 installer verification/cancel/UAC/no-reentry/readback; no real installer executed");
     set(PAYLOAD,L"4C");hexMode=true;SendMessageW(GetDlgItem(h,ENCODING),CB_SETCURSEL,0,0);SendMessageW(h,WM_COMMAND,MAKEWPARAM(ENCODING,CBN_SELCHANGE),(LPARAM)GetDlgItem(h,ENCODING));CHECK(!hexMode&&text(PAYLOAD)==L"L");CHECK(convertEncoding(true,false)&&text(PAYLOAD)==L"4C");
     set(PAYLOAD,L"GG");CHECK(!convertEncoding(false,false)&&hexMode&&text(PAYLOAD)==L"GG");
     for(int i=0;i<256;++i){Bytes b(1,(unsigned char)i),decoded;CHECK(tcpcodecs::parseTrigger(tcpcodecs::formatAscii(b),false,decoded)&&decoded==b);CHECK(tcpcodecs::parseTrigger(tcpcodecs::formatHex(b),true,decoded)&&decoded==b);}
@@ -226,9 +294,23 @@ void startupConnectsWithoutSending(){
     puts("[TEST] configured delayed startup connects once and forwards unsolicited bytes; no lifecycle trigger/no reconnect replay; user consent and keyboard options restored");
 }
 
+void installerSecurityReadOnly(){
+    std::wstring error;preparationsecurity::LockedInstaller pinned;
+    CHECK(!preparationsecurity::verify(L"relative.exe",pinned,error)&&pinned.file==INVALID_HANDLE_VALUE);
+    wchar_t directoryForTemp[MAX_PATH]={},temporary[MAX_PATH]={};GetTempPathW(MAX_PATH,directoryForTemp);CHECK(GetTempFileNameW(directoryForTemp,L"PIN",0,temporary));
+    HANDLE file=CreateFileW(temporary,GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);CHECK(file!=INVALID_HANDLE_VALUE);
+    Bytes invalidInstaller(261544,0);DWORD count=0;CHECK(WriteFile(file,invalidInstaller.data(),(DWORD)invalidInstaller.size(),&count,nullptr)&&count==invalidInstaller.size());CloseHandle(file);
+    CHECK(!preparationsecurity::verify(temporary,pinned,error)&&error.find(L"SHA256")!=std::wstring::npos);CHECK(DeleteFileW(temporary));
+    wchar_t signedPath[4096]={};
+    if(GetEnvironmentVariableW(L"SR5000_TEST_DRIVER",signedPath,4096)){CHECK(CopyFileW(signedPath,temporary,TRUE));
+        bool valid=preparationsecurity::verify(temporary,pinned,error);if(!valid)fwprintf(stderr,L"Installer verification: %s\n",error.c_str());CHECK(valid);
+        file=CreateFileW(temporary,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);CHECK(file==INVALID_HANDLE_VALUE);CHECK(!DeleteFileW(temporary));
+        pinned.reset();CHECK(DeleteFileW(temporary));puts("[TEST] real pinned driver SHA256 + Authenticode + denied modification/deletion (read-only; NEVER executed)");
+    }else puts("[TEST] security missing/relative/synthetic-invalid installer rejected; optional real signature check not requested");
+}
 int main(){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);setvbuf(stdout,nullptr,_IONBF,0);setvbuf(stderr,nullptr,_IONBF,0);
-    std::wstring liveRunBefore;CHECK(startup::ReadRun(liveRunBefore)==ERROR_SUCCESS);
+    std::wstring liveRunBefore;CHECK(startup::ReadRun(liveRunBefore)==ERROR_SUCCESS);installerSecurityReadOnly();
     CHECK(keyboardPacketSize((UINT)(offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD))));
     SerialOptions options;options.enabled=true;options.bridge=L"COM8";options.application=L"COM7";CHECK(validSerialOptions(options));options.application=L"COM8";CHECK(!validSerialOptions(options));
     std::wstring nativeId;CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com11)",nativeId)&&nativeId==L"CNCA1");CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com21)",nativeId)&&nativeId==L"CNCB1");CHECK(!com0com::EndpointIdFromTarget(LR"(\Device\Serial0)",nativeId));
