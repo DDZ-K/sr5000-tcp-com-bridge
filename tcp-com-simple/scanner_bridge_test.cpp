@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 // Explicit simulation seam. No installer/device operation is permitted by these tests.
-struct PreparationSimulation{bool active=false,win7=false,confirm=false,verified=false,launch=false;std::wstring setup;HANDLE child=nullptr;unsigned launches=0;std::wstring launchedPath,launchedArguments;std::string inventory;bool arbiterValid=true;std::vector<std::wstring> existing,reserved;};
+struct PreparationSimulation{bool active=false,win7=false,win10=false,confirm=false,verified=false,launch=false;std::wstring setup;HANDLE child=nullptr;unsigned launches=0;std::wstring launchedPath,launchedArguments,prompt;std::string inventory;bool arbiterValid=true;std::vector<std::wstring> existing,reserved;};
 PreparationSimulation preparationSimulation;
 #include "scanner_bridge.cpp"
 #include <cstdio>
@@ -82,7 +82,22 @@ void uiAndConfig(){
     CHECK(preparationText(7006).find(L"驱动")!=std::wstring::npos);
     SendMessageW(preparation,WM_COMMAND,7003,0); // This development host is Win11: must refuse old Win7 driver, not launch UAC.
     CHECK(preparationText(7006).find(L"仅支持 Windows 7 x64")!=std::wstring::npos);
-    preparationSimulation.active=true;preparationSimulation.win7=true;
+    preparationSimulation.active=true;preparationSimulation.win10=true;preparationSimulation.verified=true;
+    SendMessageW(preparation,WM_COMMAND,7005,0);
+    CHECK(preparationText(7006).find(L"Win10 x64试用驱动2.2.2")!=std::wstring::npos);
+    SendMessageW(preparation,WM_COMMAND,7003,0);
+    CHECK(preparationText(7006).find(L"取消")!=std::wstring::npos&&preparationSimulation.launches==0); // Win10 must reach explicit confirmation, not Win7-only rejection.
+    preparationSimulation.confirm=true;SendMessageW(preparation,WM_COMMAND,7003,0);
+    CHECK(preparationSimulation.launchedPath==directory+LR"(\drivers\win10-x64\setup-com0com-2.2.2-x64-signed.exe)");
+    CHECK(preparationSimulation.prompt.find(L"安装向导本身未签名，包来源和固定哈希已核对，驱动目录签名已验证")!=std::wstring::npos);
+    CHECK(preparationSimulation.prompt.find(L"代码52")!=std::wstring::npos);
+    preparationSimulation.setup=L"C:\\Program Files\\com0com\\setupc.exe";preparationSimulation.verified=false;
+    SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(preparationText(7006).find(L"保留现有驱动")!=std::wstring::npos&&preparationSimulation.launches==1);
+    preparationSimulation.setup.clear();SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(preparationText(7006).find(L"校验失败")!=std::wstring::npos&&preparationSimulation.launches==1);
+    preparationSimulation.win10=false;preparationSimulation.verified=true;
+    SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(preparationText(7006).find(L"拒绝安装")!=std::wstring::npos&&preparationSimulation.launches==1);
+    preparationSimulation.launches=0;preparationSimulation.confirm=false;
+    preparationSimulation.win10=false;preparationSimulation.verified=false;preparationSimulation.win7=true;
     SendMessageW(preparation,WM_COMMAND,7003,0);
     CHECK(preparationText(7006).find(L"校验失败")!=std::wstring::npos&&preparationSimulation.launches==0);
     preparationSimulation.verified=true;preparationSimulation.confirm=false;
@@ -130,7 +145,7 @@ void uiAndConfig(){
     SetEvent(preparationSimulation.child);SendMessageW(preparation,WM_TIMER,1,0);CHECK(!pairProcess&&preparationText(7006).find(L"未核验成功")!=std::wstring::npos&&text(COM_BRIDGE)==L"COM19"&&text(COM_APP)==L"COM20");serialbridge::testBackend.inventory=goodInventory();
     preparationSimulation.child=nullptr;preparationSimulation.setup.clear();SendMessageW(preparation,WM_COMMAND,7003,0);CHECK(driverBlocked&&!driverProcess&&!IsWindowEnabled(GetDlgItem(preparation,7004)));driverBlocked=false;preparationEnable();preparationSimulation.active=false;
     CHECK(!engine.running&&!pairProcess);SendMessageW(preparation,WM_CLOSE,0,0);refresh();set(LOG,L"");
-    puts("[TEST] preparation GUI + Win11 refusal + explicit simulated Win7 installer verification/cancel/UAC/no-reentry/readback; no real installer executed");
+    puts("[TEST] preparation GUI + simulated Win10 independent path/unsigned prompt/failed verification/preserve installed + Win11 refusal + simulated Win7 installer cancel/UAC/no-reentry/readback; no real installer executed");
     set(PAYLOAD,L"4C");hexMode=true;SendMessageW(GetDlgItem(h,ENCODING),CB_SETCURSEL,0,0);SendMessageW(h,WM_COMMAND,MAKEWPARAM(ENCODING,CBN_SELCHANGE),(LPARAM)GetDlgItem(h,ENCODING));CHECK(!hexMode&&text(PAYLOAD)==L"L");CHECK(convertEncoding(true,false)&&text(PAYLOAD)==L"4C");
     set(PAYLOAD,L"GG");CHECK(!convertEncoding(false,false)&&hexMode&&text(PAYLOAD)==L"GG");
     for(int i=0;i<256;++i){Bytes b(1,(unsigned char)i),decoded;CHECK(tcpcodecs::parseTrigger(tcpcodecs::formatAscii(b),false,decoded)&&decoded==b);CHECK(tcpcodecs::parseTrigger(tcpcodecs::formatHex(b),true,decoded)&&decoded==b);}
@@ -297,12 +312,42 @@ void startupConnectsWithoutSending(){
 void installerSecurityReadOnly(){
     std::wstring error;preparationsecurity::LockedInstaller pinned;
     CHECK(!preparationsecurity::verify(L"relative.exe",pinned,error)&&pinned.file==INVALID_HANDLE_VALUE);
+    CHECK(!preparationsecurity::verifyWin10(L"relative.exe",pinned,error)&&pinned.locks.empty());
     wchar_t directoryForTemp[MAX_PATH]={},temporary[MAX_PATH]={};GetTempPathW(MAX_PATH,directoryForTemp);CHECK(GetTempFileNameW(directoryForTemp,L"PIN",0,temporary));
     HANDLE file=CreateFileW(temporary,GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);CHECK(file!=INVALID_HANDLE_VALUE);
     Bytes invalidInstaller(261544,0);DWORD count=0;CHECK(WriteFile(file,invalidInstaller.data(),(DWORD)invalidInstaller.size(),&count,nullptr)&&count==invalidInstaller.size());CloseHandle(file);
     CHECK(!preparationsecurity::verify(temporary,pinned,error)&&error.find(L"SHA256")!=std::wstring::npos);CHECK(DeleteFileW(temporary));
+    file=CreateFileW(temporary,GENERIC_WRITE,0,nullptr,CREATE_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);CHECK(file!=INVALID_HANDLE_VALUE);invalidInstaller.resize(216423);
+    CHECK(WriteFile(file,invalidInstaller.data(),(DWORD)invalidInstaller.size(),&count,nullptr)&&count==invalidInstaller.size());CloseHandle(file);
+    CHECK(!preparationsecurity::verifyWin10(temporary,pinned,error)&&error.find(L"SHA256")!=std::wstring::npos&&pinned.locks.empty());CHECK(DeleteFileW(temporary));
+    wchar_t win10Path[4096]={};
+    if(GetEnvironmentVariableW(L"SR5000_TEST_WIN10_DRIVER",win10Path,4096)){
+        const std::wstring source=win10Path,sourceFolder=source.substr(0,source.find_last_of(L'\\'));
+        CHECK(!preparationsecurity::verify(source,pinned,error)&&pinned.locks.empty()); // Win7 profile must not accept Win10 installer.
+        CHECK(!preparationsecurity::verifyAuthenticode(source,INVALID_HANDLE_VALUE,error)); // Outer installer really is unsigned; hash is not a signer.
+        wchar_t work[MAX_PATH]={};CHECK(GetTempFileNameW(directoryForTemp,L"W10",0,work));CHECK(DeleteFileW(work));CHECK(CreateDirectoryW(work,nullptr));
+        const std::wstring install=std::wstring(work)+L"\\setup.exe",cat=std::wstring(work)+L"\\com0com.cat",sys=std::wstring(work)+L"\\com0com.sys";
+        CHECK(CopyFileW(source.c_str(),install.c_str(),TRUE));CHECK(CopyFileW((sourceFolder+L"\\com0com.cat").c_str(),cat.c_str(),TRUE));CHECK(CopyFileW((sourceFolder+L"\\com0com.sys").c_str(),sys.c_str(),TRUE));
+        bool valid=preparationsecurity::verifyWin10(install,pinned,error);
+        if(!valid)fwprintf(stderr,L"Win10 verification: %s\n",error.c_str());CHECK(valid);
+        for(const auto& locked:{install,cat,sys}){file=CreateFileW(locked.c_str(),GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);CHECK(file==INVALID_HANDLE_VALUE);CHECK(!DeleteFileW(locked.c_str()));}
+        pinned.reset();
+        auto corrupt=[&](const std::wstring& path){HANDLE writable=CreateFileW(path.c_str(),GENERIC_READ|GENERIC_WRITE,0,nullptr,OPEN_EXISTING,0,nullptr);CHECK(writable!=INVALID_HANDLE_VALUE);CHECK(SetFilePointer(writable,4096,nullptr,FILE_BEGIN)!=INVALID_SET_FILE_POINTER);BYTE byte=0;DWORD n=0;CHECK(ReadFile(writable,&byte,1,&n,nullptr)&&n==1);byte^=1;CHECK(SetFilePointer(writable,4096,nullptr,FILE_BEGIN)!=INVALID_SET_FILE_POINTER);CHECK(WriteFile(writable,&byte,1,&n,nullptr)&&n==1);CloseHandle(writable);};
+        corrupt(sys); // Genuine signed CAT alone must NOT validate a different SYS.
+        CHECK(preparationsecurity::verifyAuthenticode(cat,INVALID_HANDLE_VALUE,error));
+        CHECK(!preparationsecurity::verifyWin10(install,pinned,error)&&error.find(L"目录成员")!=std::wstring::npos&&pinned.locks.empty());
+        CHECK(CopyFileW((sourceFolder+L"\\com0com.sys").c_str(),sys.c_str(),FALSE));CHECK(DeleteFileW(cat.c_str()));
+        CHECK(!preparationsecurity::verifyWin10(install,pinned,error)&&pinned.locks.empty());
+        CHECK(CopyFileW((sourceFolder+L"\\com0com.cat").c_str(),cat.c_str(),TRUE));corrupt(cat);
+        CHECK(!preparationsecurity::verifyWin10(install,pinned,error)&&error.find(L"SHA256")!=std::wstring::npos&&pinned.locks.empty());
+        CHECK(CopyFileW((sourceFolder+L"\\com0com.cat").c_str(),cat.c_str(),FALSE));corrupt(install);
+        CHECK(!preparationsecurity::verifyWin10(install,pinned,error)&&error.find(L"SHA256")!=std::wstring::npos&&pinned.locks.empty());
+        CHECK(DeleteFileW(install.c_str()));CHECK(DeleteFileW(cat.c_str()));CHECK(DeleteFileW(sys.c_str()));CHECK(RemoveDirectoryW(work));
+        puts("[TEST] real Win10 pinned installer + CAT signature + SYS catalog member; all files locked; tampered installer/CAT/SYS, missing CAT and wrong profile rejected (copies only; NEVER executed)");
+    }
     wchar_t signedPath[4096]={};
     if(GetEnvironmentVariableW(L"SR5000_TEST_DRIVER",signedPath,4096)){CHECK(CopyFileW(signedPath,temporary,TRUE));
+        CHECK(!preparationsecurity::verifyWin10(temporary,pinned,error)&&pinned.locks.empty()); // Never reuse Win7 driver for Win10.
         bool valid=preparationsecurity::verify(temporary,pinned,error);if(!valid)fwprintf(stderr,L"Installer verification: %s\n",error.c_str());CHECK(valid);
         file=CreateFileW(temporary,GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE,nullptr,OPEN_EXISTING,0,nullptr);CHECK(file==INVALID_HANDLE_VALUE);CHECK(!DeleteFileW(temporary));
         pinned.reset();CHECK(DeleteFileW(temporary));puts("[TEST] real pinned driver SHA256 + Authenticode + denied modification/deletion (read-only; NEVER executed)");
@@ -311,6 +356,14 @@ void installerSecurityReadOnly(){
 int main(){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);setvbuf(stdout,nullptr,_IONBF,0);setvbuf(stderr,nullptr,_IONBF,0);
     std::wstring liveRunBefore;CHECK(startup::ReadRun(liveRunBefore)==ERROR_SUCCESS);installerSecurityReadOnly();
+    CHECK(preparationProfileFor(6,1,7601,VER_NT_WORKSTATION,PROCESSOR_ARCHITECTURE_AMD64)==PreparationProfile::Win7x64);
+    for(DWORD build:{10240UL,19045UL,21999UL})CHECK(preparationProfileFor(10,0,build,VER_NT_WORKSTATION,PROCESSOR_ARCHITECTURE_AMD64)==PreparationProfile::Win10x64);
+    for(DWORD build:{0UL,10239UL,22000UL,26100UL})CHECK(preparationProfileFor(10,0,build,VER_NT_WORKSTATION,PROCESSOR_ARCHITECTURE_AMD64)==PreparationProfile::Unsupported);
+    CHECK(preparationProfileFor(10,0,19045,VER_NT_SERVER,PROCESSOR_ARCHITECTURE_AMD64)==PreparationProfile::Unsupported);
+    CHECK(preparationProfileFor(10,0,19045,VER_NT_WORKSTATION,PROCESSOR_ARCHITECTURE_INTEL)==PreparationProfile::Unsupported);
+    CHECK(preparationProfileFor(10,0,19045,VER_NT_WORKSTATION,12)==PreparationProfile::Unsupported); // ARM64 native architecture, even under x64 emulation.
+    CHECK(preparationProfileFor(6,3,9600,VER_NT_WORKSTATION,PROCESSOR_ARCHITECTURE_AMD64)==PreparationProfile::Unsupported);
+    puts("[TEST] real-version profile bounds: Win7 x64 unchanged, Win10 workstation AMD64 only, Win11/server/x86/ARM64 rejected");
     CHECK(keyboardPacketSize((UINT)(offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD))));
     SerialOptions options;options.enabled=true;options.bridge=L"COM8";options.application=L"COM7";CHECK(validSerialOptions(options));options.application=L"COM8";CHECK(!validSerialOptions(options));
     std::wstring nativeId;CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com11)",nativeId)&&nativeId==L"CNCA1");CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com21)",nativeId)&&nativeId==L"CNCB1");CHECK(!com0com::EndpointIdFromTarget(LR"(\Device\Serial0)",nativeId));

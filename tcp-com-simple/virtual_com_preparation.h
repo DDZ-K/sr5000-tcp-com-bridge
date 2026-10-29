@@ -18,16 +18,23 @@ void preparationEnable(){
     for(UINT id:{PREP_INSTALL,PREP_CREATE,PREP_BRIDGE,PREP_APP,PREP_CHECK})EnableWindow(GetDlgItem(preparationWindow,(int)id),idle);
     EnableWindow(GetDlgItem(window,CONNECT),idle);EnableWindow(GetDlgItem(window,COM_PAIR),idle);
 }
-bool preparationWin7x64(){
+enum class PreparationProfile {Unsupported,Win7x64,Win10x64};
+PreparationProfile preparationProfileFor(DWORD major,DWORD minor,DWORD build,BYTE product,WORD architecture){
+    if(product!=VER_NT_WORKSTATION||architecture!=PROCESSOR_ARCHITECTURE_AMD64)return PreparationProfile::Unsupported;
+    if(major==6&&minor==1)return PreparationProfile::Win7x64;
+    if(major==10&&minor==0&&build>=10240&&build<22000)return PreparationProfile::Win10x64;
+    return PreparationProfile::Unsupported;
+}
+PreparationProfile preparationProfile(){
 #ifdef TCP_TESTER_TEST
-    if(preparationSimulation.active)return preparationSimulation.win7;
+    if(preparationSimulation.active)return preparationSimulation.win7?PreparationProfile::Win7x64:(preparationSimulation.win10?PreparationProfile::Win10x64:PreparationProfile::Unsupported);
 #endif
     // RtlGetVersion reports the real OS, not the manifest/compatibility-lied GetVersionEx.
     typedef LONG (WINAPI *VersionFunction)(OSVERSIONINFOW*);
     FARPROC address=GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"RtlGetVersion");VersionFunction version=nullptr;
     static_assert(sizeof(version)==sizeof(address),"function pointer size");memcpy(&version,&address,sizeof(version));
     OSVERSIONINFOEXW info={};info.dwOSVersionInfoSize=sizeof(info);SYSTEM_INFO system={};GetNativeSystemInfo(&system);
-    return version&&version((OSVERSIONINFOW*)&info)==0&&info.dwMajorVersion==6&&info.dwMinorVersion==1&&info.wProductType==VER_NT_WORKSTATION&&system.wProcessorArchitecture==PROCESSOR_ARCHITECTURE_AMD64;
+    return version&&version((OSVERSIONINFOW*)&info)==0?preparationProfileFor(info.dwMajorVersion,info.dwMinorVersion,info.dwBuildNumber,info.wProductType,system.wProcessorArchitecture):PreparationProfile::Unsupported;
 }
 void preparationCandidates(){
     const std::wstring beforeBridge=preparationText(PREP_BRIDGE),beforeApp=preparationText(PREP_APP);std::vector<std::wstring> choices;
@@ -44,27 +51,32 @@ void preparationCandidates(){
 }
 void checkPreparationDriver(){
     preparationCandidates();
-    preparationStatus(preparationSetup().empty()?L"未发现可信的com0com驱动管理程序。Win7 x64可点击安装驱动；Win10/11须使用已获批的适配驱动。":L"已发现受管理员保护的驱动管理程序。已有串口对优先保留；新建请选两个空闲COM。");
+    const auto profile=preparationProfile();
+    const std::wstring advice=profile==PreparationProfile::Win7x64?L"Win7 x64可点击安装驱动。":(profile==PreparationProfile::Win10x64?L"Win10 x64试用驱动2.2.2；已有驱动优先保留。代码52停下反馈，不关闭签名或安全启动。":L"Win11及其他系统拒绝包内自动安装，请使用已获批的适配驱动。");
+    preparationStatus(preparationSetup().empty()?L"未发现可信的com0com驱动管理程序。"+advice:L"已发现受管理员保护的驱动管理程序。已有串口对优先保留；新建请选两个空闲COM。");
 }
 void installPreparationDriver(){
     cancelStartup();
     if(driverBusy()||pairProcess||pairLaunching||pairBlocked){preparationStatus(L"系统设置尚未结束，禁止重复操作；不会强杀进程。");return;}
     if(engine.running||engine.serialOpened||engine.receiveOnline||engine.sendOnline){preparationStatus(L"请先断开桥接连接并关闭目标软件串口，再准备虚拟串口。");return;}
-    if(!preparationWin7x64()){preparationStatus(L"包内驱动仅支持 Windows 7 x64；当前系统拒绝安装。Win10/11请使用已获批的适配驱动；若已安装可信setupc，仍可创建新串口对。");return;}
+    const auto profile=preparationProfile();
+    if(profile==PreparationProfile::Unsupported){preparationStatus(L"包内自动安装仅支持 Windows 7 x64 或 Windows 10 x64（试用）；Win11及其他系统拒绝安装。若已安装可信setupc，仍可创建新串口对。");return;}
     if(!preparationSetup().empty()){preparationStatus(L"已发现可信驱动管理程序，保留现有驱动；不重复安装。可选择空闲COM创建新对，或返回主界面核验已有对。");return;}
-    std::wstring path=directory+preparationsecurity::InstallerRelative,error;bool verified=false;
+    const bool win10=profile==PreparationProfile::Win10x64;
+    std::wstring path=directory+(win10?preparationsecurity::Win10InstallerRelative:preparationsecurity::InstallerRelative),error;bool verified=false;
 #ifdef TCP_TESTER_TEST
     if(preparationSimulation.active){verified=preparationSimulation.verified;error=L"模拟签名/哈希校验失败";}
     else
 #endif
-    verified=preparationsecurity::verify(path,installerPin,error);
+    verified=win10?preparationsecurity::verifyWin10(path,installerPin,error):preparationsecurity::verify(path,installerPin,error);
     if(!verified){preparationStatus(L"安装器校验失败："+error);return;}
     driverLaunching=true;preparationEnable();bool approved=false;
+    const std::wstring prompt=(win10?std::wstring(L"Win10 x64试用驱动2.2.2；已有驱动优先保留。\r\n安装向导本身未签名，包来源和固定哈希已核对，驱动目录签名已验证。\r\n旧证书不保证每个Win10安全策略可加载；代码52请停下反馈，不关闭签名或安全启动。\r\n"):std::wstring(L"包内固定Win7 x64安装器的SHA256及Authenticode已校验。\r\n"))+L"将请求Windows管理员授权，请在安装器中核对选项。已有COM对不要重复创建。\r\n安装完成后本工具只重新检查驱动，不自动创建COM，不连接TCP、不发指令。继续吗？";
 #ifdef TCP_TESTER_TEST
-    if(preparationSimulation.active)approved=preparationSimulation.confirm;
+    if(preparationSimulation.active){preparationSimulation.prompt=prompt;approved=preparationSimulation.confirm;}
     else
 #endif
-    approved=MessageBoxW(preparationWindow,L"包内固定Win7 x64安装器的SHA256及Authenticode已校验。\r\n将请求Windows管理员授权，请在安装器中核对选项。已有COM对不要重复创建。\r\n安装完成后本工具只重新检查驱动，不自动创建COM，不连接TCP、不发指令。继续吗？",L"确认安装虚拟串口驱动",MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING)==IDYES;
+    approved=MessageBoxW(preparationWindow,prompt.c_str(),L"确认安装虚拟串口驱动",MB_YESNO|MB_DEFBUTTON2|MB_ICONWARNING)==IDYES;
     if(!approved){driverLaunching=false;installerPin.reset();preparationEnable();preparationStatus(L"已取消安装，未更改系统。");return;}
     SHELLEXECUTEINFOW start={};start.cbSize=sizeof(start);start.fMask=SEE_MASK_NOCLOSEPROCESS|SEE_MASK_NOASYNC;start.hwnd=preparationWindow;start.lpVerb=L"runas";start.lpFile=path.c_str();start.lpParameters=nullptr;start.nShow=SW_SHOWNORMAL;
     bool launched=false;
@@ -101,7 +113,7 @@ void createPreparationPair(){
     cancelStartup();
     if(driverBusy()||pairProcess||pairLaunching||pairBlocked){preparationStatus(L"系统设置尚未结束，禁止重复创建。");return;}
     if(engine.running||engine.serialOpened||engine.receiveOnline||engine.sendOnline){preparationStatus(L"请先断开桥接连接，并关闭目标软件串口。");return;}
-    const std::wstring setup=preparationSetup();if(setup.empty()){preparationStatus(L"请先安装适配驱动，再检查是否发现可信setupc。Win10/11不能安装包内Win7驱动。");return;}
+    const std::wstring setup=preparationSetup();if(setup.empty()){preparationStatus(L"请先安装适配驱动，再检查是否发现可信setupc。Win7/Win10 x64分别使用对应包；Win11拒绝包内自动安装。");return;}
     SerialOptions o=serialFromUI();o.bridge=upperCom(preparationText(PREP_BRIDGE));o.application=upperCom(preparationText(PREP_APP));std::wstring error;
     if(!validSerialOptions(o)||!namesFree(o,error)){preparationStatus(error.empty()?L"请输入两个不同的有效COM号，并核对主界面串口参数。":error);return;}
     com0com::Inventory inventory;bool captured=false;
@@ -130,7 +142,7 @@ void createPreparationPair(){
 LRESULT CALLBACK preparationProc(HWND h,UINT m,WPARAM w,LPARAM l){
     if(m==WM_CREATE){preparationWindow=h;
         preferenceControl(h,L"STATIC",L"1  检查 / 安装驱动",0,24,18,600,28,0);
-        preferenceControl(h,L"STATIC",L"已有虚拟串口对请保留，在主界面选择并用“配对设置”核验。\r\nWin10/11请使用已获批的适配驱动；不关闭签名或安全启动。",0,24,54,600,54,0);
+        preferenceControl(h,L"STATIC",L"已有对/驱动优先保留；Win10 x64试用驱动2.2.2，Win11不自动安装。\r\n不保证各Win10安全策略加载；代码52停下反馈，不关闭签名或安全启动。",0,24,54,600,54,0);
         preferenceControl(h,L"BUTTON",L"检查驱动",WS_TABSTOP,24,116,125,34,PREP_CHECK);
         preferenceControl(h,L"BUTTON",L"安装驱动",WS_TABSTOP,164,116,125,34,PREP_INSTALL);
         preferenceControl(h,L"STATIC",L"2  选择两个新COM（可下拉或手填）",0,24,174,600,28,0);
