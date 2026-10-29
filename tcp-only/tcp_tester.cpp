@@ -12,6 +12,8 @@
 #include <thread>
 #include <atomic>
 #include <cstdio>
+#include <cstddef>
+#include <cstring>
 #include "tcp_codecs.h"
 #pragma comment(lib,"ws2_32.lib")
 #pragma comment(lib,"user32.lib")
@@ -20,6 +22,7 @@
 namespace {
 using Bytes=std::vector<unsigned char>;
 bool requiresCom(){return false;}
+bool keyboardPacketSize(UINT bytes){return bytes>=offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD)&&bytes<4096;}
 struct Settings{std::wstring ip;int receivePort=0,sendPort=0;};
 struct Record{std::wstring channel,text;Bytes bytes;bool payload=false;};
 struct Request{Bytes bytes;ULONGLONG when;};
@@ -148,6 +151,19 @@ void connectClicked(){
 void sendClicked(){Bytes bytes;if(!tcpcodecs::parseTrigger(text(PAYLOAD),hexMode,bytes)){engine.info(L"拒绝",L"输入不是所选编码的有效数据，未发送");}
     else if(!engine.queue(bytes))engine.info(L"拒绝",L"发送连接未就绪或队列已满，未发送、不会补发");refresh();}
 HWND control(const wchar_t* cls,const wchar_t* label,DWORD style,int x,int y,int w,int h,UINT id){HWND c=CreateWindowW(cls,label,WS_CHILD|WS_VISIBLE|style,x,y,w,h,window,(HMENU)(UINT_PTR)id,nullptr,nullptr);SendMessageW(c,WM_SETFONT,(WPARAM)font,TRUE);return c;}
+bool handleKeyboardPacket(const void* packet,UINT count,DWORD captured,DWORD foregroundPid){
+    if(!packet||!keyboardPacketSize(count))return false;
+    RAWINPUTHEADER header={};memcpy(&header,packet,sizeof(header));
+    if(header.dwType!=RIM_TYPEKEYBOARD||header.dwSize<offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD)||header.dwSize>count)return false;
+    RAWKEYBOARD key={};memcpy(&key,(const BYTE*)packet+offsetof(RAWINPUT,data),sizeof(key));
+    const UINT selected=tcpcodecs::keyCode(text(KEY));if(!selected||key.VKey!=selected)return false;
+    if(key.Flags&RI_KEY_BREAK){keyDown=false;return true;}
+    if(keyDown)return true;keyDown=true;
+    if(SendMessageW(GetDlgItem(window,HOTKEY),BM_GETCHECK,0,0)!=BST_CHECKED)return true;
+    if((LONG)(captured-hotkeyBoundary)<0||(DWORD)(GetTickCount()-captured)>250){engine.info(L"按键",L"已捕获按键，但输入已过期，丢弃且不补发");return true;}
+    if(foregroundPid==GetCurrentProcessId()){engine.info(L"按键",L"已捕获 "+text(KEY)+L"；调试窗口在前台，未发送。切到记事本/包装程序测试后台按键");return true;}
+    engine.info(L"按键",L"已捕获后台 "+text(KEY)+L"，提交当前触发内容");sendClicked();return true;
+}
 LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
     if(m==WM_CREATE){window=h;font=CreateFontW(-17,0,0,0,FW_NORMAL,FALSE,FALSE,FALSE,DEFAULT_CHARSET,OUT_DEFAULT_PRECIS,CLIP_DEFAULT_PRECIS,CLEARTYPE_QUALITY,DEFAULT_PITCH,L"Segoe UI");
         control(L"STATIC",L"扫码枪 IPv4",0,16,18,130,24,0);control(L"EDIT",ini(L"ReaderIp").c_str(),WS_BORDER|WS_TABSTOP|ES_AUTOHSCROLL,145,14,235,28,IP);
@@ -166,11 +182,19 @@ LRESULT CALLBACK proc(HWND h,UINT m,WPARAM w,LPARAM l){
     if(m==WM_TIMER){refresh();RECT indicatorArea={12,258,807,281};InvalidateRect(h,&indicatorArea,FALSE);return 0;}
     if(m==WM_PAINT){PAINTSTRUCT paint={};HDC dc=BeginPaint(h,&paint);for(int i=0;i<2;++i){bool online=i==0?engine.receiveOnline.load():engine.sendOnline.load();HBRUSH brush=CreateSolidBrush(online?RGB(0,145,80):RGB(192,0,0));HGDIOBJ old=SelectObject(dc,brush);HGDIOBJ pen=SelectObject(dc,GetStockObject(NULL_PEN));int x=i==0?16:315;Ellipse(dc,x,263,x+12,275);SelectObject(dc,pen);SelectObject(dc,old);DeleteObject(brush);}EndPaint(h,&paint);return 0;}
     if(m==WM_COMMAND){if(LOWORD(w)==ENCODING&&HIWORD(w)==CBN_SELCHANGE){convertEncoding(SendMessageW(GetDlgItem(h,ENCODING),CB_GETCURSEL,0,0)==1);return 0;}
-        switch(LOWORD(w)){case CONNECT:connectClicked();return 0;case DISCONNECT:engine.stop();hotkeyBoundary=GetTickCount();engine.info(L"用户",L"已手动断开");refresh();return 0;case SEND:sendClicked();return 0;case CLEAR:set(LOG,L"");return 0;case HOTKEY:hotkeyBoundary=GetTickCount();keyDown=false;return 0;}}
-    if(m==WM_INPUT){UINT size=0;if(GetRawInputData((HRAWINPUT)l,RID_INPUT,nullptr,&size,sizeof(RAWINPUTHEADER))==0&&size>=sizeof(RAWINPUT)&&size<4096){std::vector<BYTE> b(size);if(GetRawInputData((HRAWINPUT)l,RID_INPUT,b.data(),&size,sizeof(RAWINPUTHEADER))!=UINT(-1)){
-        RAWINPUT* r=(RAWINPUT*)b.data();if(r->header.dwType==RIM_TYPEKEYBOARD&&r->data.keyboard.VKey==tcpcodecs::keyCode(text(KEY))){if(r->data.keyboard.Flags&RI_KEY_BREAK)keyDown=false;else if(!keyDown){keyDown=true;DWORD tick=(DWORD)GetMessageTime();DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
-            if(pid!=GetCurrentProcessId()&&SendMessageW(GetDlgItem(h,HOTKEY),BM_GETCHECK,0,0)==BST_CHECKED&&(LONG)(tick-hotkeyBoundary)>=0&&(DWORD)(GetTickCount()-tick)<=250)sendClicked();}}}}
-        return DefWindowProcW(h,m,w,l);}
+        switch(LOWORD(w)){case CONNECT:connectClicked();return 0;case DISCONNECT:engine.stop();hotkeyBoundary=GetTickCount();engine.info(L"用户",L"已手动断开");refresh();return 0;case SEND:sendClicked();return 0;case CLEAR:set(LOG,L"");return 0;case HOTKEY:hotkeyBoundary=GetTickCount();keyDown=false;engine.info(L"按键",SendMessageW(GetDlgItem(h,HOTKEY),BM_GETCHECK,0,0)==BST_CHECKED?L"后台按键触发已开启；请切到其他窗口测试，原按键不会被吞掉":L"后台按键触发已关闭");refresh();return 0;}}
+    if(m==WM_INPUT){
+        UINT size=0;
+        if(GetRawInputData((HRAWINPUT)l,RID_INPUT,nullptr,&size,sizeof(RAWINPUTHEADER))==0&&keyboardPacketSize(size)){
+            std::vector<BYTE> packet(size);UINT capacity=size;
+            UINT copied=GetRawInputData((HRAWINPUT)l,RID_INPUT,packet.data(),&capacity,sizeof(RAWINPUTHEADER));
+            if(copied!=UINT(-1)&&copied<=packet.size()){
+                DWORD pid=0;GetWindowThreadProcessId(GetForegroundWindow(),&pid);
+                handleKeyboardPacket(packet.data(),copied,(DWORD)GetMessageTime(),pid);
+            }else engine.info(L"按键",L"读取键盘数据失败，Windows错误 "+std::to_wstring(GetLastError()));
+        }
+        return DefWindowProcW(h,m,w,l);
+    }
     if(m==WM_CLOSE){DestroyWindow(h);return 0;}
     if(m==WM_DESTROY){KillTimer(h,1);engine.stop();DeleteObject(font);PostQuitMessage(0);return 0;}
     return DefWindowProcW(h,m,w,l);
@@ -182,10 +206,10 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int){
     wchar_t exe[4096];GetModuleFileNameW(nullptr,exe,4096);directory=exe;directory=directory.substr(0,directory.find_last_of(L"\\/"));configPath=directory+L"\\tcp.ini";
     WSADATA wsa={};if(WSAStartup(MAKEWORD(2,2),&wsa)){CloseHandle(single);return 1;}
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=instance;wc.lpszClassName=L"SR5000TcpOnlyWindow";wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hIcon=LoadIconW(nullptr,IDI_APPLICATION);wc.hbrBackground=(HBRUSH)(COLOR_BTNFACE+1);RegisterClassW(&wc);
-    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 扫码枪 TCP 调试（不使用 COM）",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,850,650,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
+    HWND h=CreateWindowW(wc.lpszClassName,L"SR-5000 扫码枪 TCP 调试 v1.0.1（不使用 COM）",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,850,650,nullptr,nullptr,instance,nullptr);if(!h){WSACleanup();CloseHandle(single);return 2;}
     RAWINPUTDEVICE rid={};rid.usUsagePage=1;rid.usUsage=6;rid.dwFlags=RIDEV_INPUTSINK;rid.hwndTarget=h;
-    if(!RegisterRawInputDevices(&rid,1,sizeof(rid))){EnableWindow(GetDlgItem(h,HOTKEY),FALSE);engine.info(L"按键",L"后台键盘注册失败，仍可用按钮发送和接收TCP");}
-    ShowWindow(h,SW_SHOW);MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){if(!IsDialogMessageW(h,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
+    if(!RegisterRawInputDevices(&rid,1,sizeof(rid))){EnableWindow(GetDlgItem(h,HOTKEY),FALSE);engine.info(L"按键",L"后台键盘注册失败，Windows错误 "+std::to_wstring(GetLastError())+L"；仍可用按钮收发TCP");}else engine.info(L"按键",L"后台键盘监听已注册（v1.0.1：兼容40字节键盘报文），勾选后可用");
+    ShowWindow(h,SW_SHOW);MSG msg;while(GetMessageW(&msg,nullptr,0,0)>0){if(msg.message==WM_INPUT||!IsDialogMessageW(h,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}
     engine.stop();WSACleanup();CloseHandle(single);return 0;
 }
 #endif

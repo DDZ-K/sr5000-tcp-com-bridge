@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <cstddef>
 #define CHECK(...) do{if(!(__VA_ARGS__)){fprintf(stderr,"FAILED %s:%d: %s\n",__FILE__,__LINE__,#__VA_ARGS__);std::abort();}}while(false)
 struct Listener{
     SOCKET s;int port;
@@ -64,10 +65,32 @@ void uiAndConfig(){
     while(engine.rxBytes<4&&GetTickCount64()<until)Sleep(5);CHECK(engine.rxBytes==4);SendMessageW(h,WM_TIMER,1,0);
     CHECK(text(LOG).find(L"31 32 33 0D")!=std::wstring::npos&&text(LOG).find(L"123\\r")!=std::wstring::npos);
     SendMessageW(h,WM_COMMAND,SEND,0);CHECK(readExactly(scanPeer,4)==Bytes({'L','O','N',13}));
+    // Exact Win64 keyboard packet (40 bytes), not sizeof(RAWINPUT)==48.
+    const UINT packetSize=(UINT)(offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD));static_assert(offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD)==40,"expected Win64 raw keyboard layout");
+    RAWINPUT raw={};raw.header.dwType=RIM_TYPEKEYBOARD;raw.header.dwSize=packetSize;raw.data.keyboard.VKey=VK_RETURN;
+    std::vector<BYTE> packet(packetSize);memcpy(packet.data(),&raw,packetSize);
+    CHECK(!handleKeyboardPacket(packet.data(),packetSize-1,GetTickCount(),0));
+    SendMessageW(GetDlgItem(h,HOTKEY),BM_SETCHECK,BST_CHECKED,0);SendMessageW(h,WM_COMMAND,HOTKEY,0);keyDown=false;
+    CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),0));CHECK(readExactly(scanPeer,4)==Bytes({'L','O','N',13}));
+    CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),0));
+    fd_set noRepeat;FD_ZERO(&noRepeat);FD_SET(scanPeer,&noRepeat);timeval tiny={0,60000};CHECK(select(0,&noRepeat,nullptr,nullptr,&tiny)==0);
+    raw.data.keyboard.Flags=RI_KEY_BREAK;memcpy(packet.data(),&raw,packetSize);CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),0));
+    raw.data.keyboard.Flags=0;memcpy(packet.data(),&raw,packetSize);CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),0));CHECK(readExactly(scanPeer,4)==Bytes({'L','O','N',13}));
+    raw.data.keyboard.Flags=RI_KEY_BREAK;memcpy(packet.data(),&raw,packetSize);CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),0));
+    raw.data.keyboard.Flags=0;memcpy(packet.data(),&raw,packetSize);CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount()-1000,0));
+    FD_ZERO(&noRepeat);FD_SET(scanPeer,&noRepeat);tiny.tv_sec=0;tiny.tv_usec=60000;CHECK(select(0,&noRepeat,nullptr,nullptr,&tiny)==0);
+    keyDown=false;CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),GetCurrentProcessId()));
+    FD_ZERO(&noRepeat);FD_SET(scanPeer,&noRepeat);tiny.tv_sec=0;tiny.tv_usec=60000;CHECK(select(0,&noRepeat,nullptr,nullptr,&tiny)==0);
+    keyDown=false;SendMessageW(GetDlgItem(h,HOTKEY),BM_SETCHECK,BST_UNCHECKED,0);CHECK(handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),0));
+    FD_ZERO(&noRepeat);FD_SET(scanPeer,&noRepeat);tiny.tv_sec=0;tiny.tv_usec=60000;CHECK(select(0,&noRepeat,nullptr,nullptr,&tiny)==0);
+    raw.header.dwType=RIM_TYPEMOUSE;memcpy(packet.data(),&raw,packetSize);CHECK(!handleKeyboardPacket(packet.data(),packetSize,GetTickCount(),0));
+    refresh();CHECK(text(LOG).find(L"已捕获后台 Enter")!=std::wstring::npos);
+
     SendMessageW(h,WM_COMMAND,DISCONNECT,0);CHECK(!engine.receiveOnline&&!engine.sendOnline);closesocket(scanPeer);
     DestroyWindow(h);window=nullptr;DeleteFileW(configPath.c_str());DeleteFileW((directory+L"\\logs\\tcp.log").c_str());RemoveDirectoryW((directory+L"\\logs").c_str());RemoveDirectoryW(directory.c_str());
 }
 int main(){
+    CHECK(keyboardPacketSize((UINT)(offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD))));
     WSADATA w={};CHECK(WSAStartup(MAKEWORD(2,2),&w)==0);CHECK(!requiresCom());CHECK(!validSettings(Settings{}));uiAndConfig();shared();separate();independentFailure();engine.stop();WSACleanup();
-    puts("PASS: no COM, actual shared/split engine, unsolicited binary RX, exact ASCII/HEX TX, separate ACK channel, independent channel failure, disconnect/no replay, selector conversion, 256-byte roundtrips, atomic config lock failure, hotkey initially off");
+    puts("PASS: no COM, actual shared/split engine, unsolicited binary RX, exact ASCII/HEX TX, separate ACK channel, independent channel failure, disconnect/no replay, selector conversion, 256-byte roundtrips, atomic config lock failure, hotkey initially off, Win64 exact40-byte raw keyboard -> real network trigger, repeat suppression, key-up/new press, stale/off/own-window/mouse rejection");
 }
