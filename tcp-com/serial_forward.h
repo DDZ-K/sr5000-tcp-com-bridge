@@ -9,6 +9,7 @@
 #include <atomic>
 #include <memory>
 #include "com0com_inventory.h"
+#include "native_inventory.h"
 #pragma comment(lib,"advapi32.lib")
 #pragma comment(lib,"ole32.lib")
 #pragma comment(lib,"uuid.lib")
@@ -78,17 +79,22 @@ std::wstring findSetupc(){
 struct TestBackend{bool enabled=false;std::wstring path;std::atomic<bool> peer,failWrite;std::string inventory;TestBackend():peer(true),failWrite(false){}};
 TestBackend testBackend;
 #endif
-inline bool inspectPair(const SerialOptions& options,std::wstring& error){
-    com0com::Inventory inventory;std::string detail;
+inline bool readSelectedInventory(const SerialOptions& options,com0com::Inventory& inventory,std::wstring& error){
+    error.clear();
 #ifdef TCP_TESTER_TEST
-    if(testBackend.enabled){if(!com0com::ParseInventory(testBackend.inventory,inventory,detail)){error=wide(detail);return false;}}else
+    if(testBackend.enabled){std::string detail;if(!com0com::ParseInventory(testBackend.inventory,inventory,detail)){error=wide(detail);return false;}return true;}
 #endif
-    {
-        std::wstring path=findSetupc();if(path.empty()){error=L"未找到受管理员保护的 com0com/setupc.exe，请先安装或核对驱动（已有COM不要重复安装）。";return false;}
-        auto capture=com0com::CaptureInventory(path,2000);if(capture.status!=com0com::CaptureStatus::Ok){
-            error=L"读取配对失败：Windows错误 "+std::to_wstring(capture.win32Error)+L"。740/5请管理员核实后运行工具，不自动提权。";return false;}
-        inventory=capture.inventory;
-    }
+    std::wstring nativeError;
+    // No installer process is needed for normal already-installed COM pairs.
+    if(com0com::CaptureNativeSelected(options.application,options.bridge,inventory,nativeError))return true;
+    std::wstring path=findSetupc();
+    if(path.empty()){error=L"系统配对检查："+nativeError+L"；未找到可信setupc用于备用核验。不会跳过配对检查。";return false;}
+    auto capture=com0com::CaptureInventory(path,2000);
+    if(capture.status!=com0com::CaptureStatus::Ok){error=L"系统配对检查："+nativeError+L"；备用列表："+com0com::DescribeCaptureFailure(capture);return false;}
+    inventory=capture.inventory;return true;
+}
+inline bool inspectPair(const SerialOptions& options,std::wstring& error){
+    com0com::Inventory inventory;if(!readSelectedInventory(options,inventory,error))return false;
     auto pair=com0com::ValidatePair(inventory,narrow(options.application),narrow(options.bridge));
     if(!pair.identityVerified){error=L"桥接COM和软件COM不是库存中的同一虚拟串口对，未打开串口。";return false;}
     if(!pair.pinsVerified){error=L"串口配对正确，但需设置：软件端 EmuOverrun=yes；桥接端 dsr=ropen、EmuBR=yes。请点“配对设置”核对后配置。";return false;}

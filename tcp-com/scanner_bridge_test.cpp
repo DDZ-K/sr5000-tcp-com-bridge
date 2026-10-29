@@ -126,6 +126,28 @@ void serialSplitAndFaults(){
 }
 
 
+void nativeRegistryEvidence(){
+    const std::wstring path=L"Software\\SR5000NativeTest_"+std::to_wstring(GetCurrentProcessId());HKEY parameters=nullptr,a=nullptr,b=nullptr;
+    CHECK(RegCreateKeyExW(HKEY_CURRENT_USER,path.c_str(),0,nullptr,0,KEY_READ|KEY_WRITE,nullptr,&parameters,nullptr)==ERROR_SUCCESS);
+    CHECK(RegCreateKeyExW(parameters,L"CNCA1",0,nullptr,0,KEY_READ|KEY_WRITE,nullptr,&a,nullptr)==ERROR_SUCCESS);
+    CHECK(RegCreateKeyExW(parameters,L"CNCB1",0,nullptr,0,KEY_READ|KEY_WRITE,nullptr,&b,nullptr)==ERROR_SUCCESS);
+    const auto putString=[](HKEY key,const wchar_t* name,const std::wstring& value){CHECK(RegSetValueExW(key,name,0,REG_SZ,(const BYTE*)value.c_str(),(DWORD)((value.size()+1)*sizeof(wchar_t)))==ERROR_SUCCESS);};
+    const auto putNumber=[](HKEY key,const wchar_t* name,DWORD value){CHECK(RegSetValueExW(key,name,0,REG_DWORD,(const BYTE*)&value,sizeof(value))==ERROR_SUCCESS);};
+    putString(a,L"PortName",L"COM7");putString(b,L"PortName",L"COM8");com0com::Endpoint ea,eb;std::wstring error;
+    CHECK(com0com::NativeEndpointFromEvidence(parameters,L"COM7",LR"(\Device\com0com11)",false,ea,error));CHECK(com0com::NativeEndpointFromEvidence(parameters,L"COM8",LR"(\Device\com0com21)",false,eb,error));
+    com0com::Inventory inventory;inventory.endpoints={ea,eb};auto pair=com0com::ValidatePair(inventory,"COM7","COM8");CHECK(pair.identityVerified&&!pair.pinsVerified); // existing pair, defaults are not safety-ready
+    putNumber(a,L"EmuOverrun",1);putNumber(b,L"EmuBR",1);putNumber(b,L"dsr",0x80);
+    CHECK(com0com::NativeEndpointFromEvidence(parameters,L"COM7",LR"(\Device\com0com11)",false,ea,error));CHECK(com0com::NativeEndpointFromEvidence(parameters,L"COM8",LR"(\Device\com0com21)",false,eb,error));inventory.endpoints={ea,eb};CHECK(com0com::ValidatePair(inventory,"COM7","COM8").ok());
+    CHECK(!com0com::NativeEndpointFromEvidence(parameters,L"COM9",LR"(\Device\com0com21)",false,eb,error));CHECK(!com0com::NativeEndpointFromEvidence(parameters,L"COM8",LR"(\Device\Serial0)",false,eb,error));
+    putString(b,L"PortName",L"COM#");CHECK(!com0com::NativeEndpointFromEvidence(parameters,L"COM8",LR"(\Device\com0com21)",false,eb,error));CHECK(com0com::NativeEndpointFromEvidence(parameters,L"COM8",LR"(\Device\com0com21)",true,eb,error));
+    putNumber(b,L"dsr",0x80000080);CHECK(com0com::NativeEndpointFromEvidence(parameters,L"COM8",LR"(\Device\com0com21)",true,eb,error));CHECK(eb.parameters.at("dsr")!="ropen");putString(b,L"EmuBR",L"1");CHECK(!com0com::NativeEndpointFromEvidence(parameters,L"COM8",LR"(\Device\com0com21)",true,eb,error));
+    RegCloseKey(a);RegCloseKey(b);CHECK(RegDeleteKeyW(parameters,L"CNCA1")==ERROR_SUCCESS);CHECK(RegDeleteKeyW(parameters,L"CNCB1")==ERROR_SUCCESS);RegCloseKey(parameters);CHECK(RegDeleteKeyW(HKEY_CURRENT_USER,path.c_str())==ERROR_SUCCESS);
+    std::wstring id;CHECK(!com0com::EndpointIdFromTarget(LR"(\Device\com0com201)",id));CHECK(!com0com::EndpointIdFromTarget(LR"(\Device\com0com321)",id));
+    com0com::CaptureResult failure;failure.status=com0com::CaptureStatus::NonzeroExit;failure.exitCode=23;failure.output="Access denied";CHECK(com0com::DescribeCaptureFailure(failure).find(L"23")!=std::wstring::npos);CHECK(com0com::DescribeCaptureFailure(failure).find(L"740")==std::wstring::npos);
+    failure.status=com0com::CaptureStatus::Win32Error;failure.win32Error=740;CHECK(com0com::DescribeCaptureFailure(failure).find(L"管理员")!=std::wstring::npos);
+    puts("[TEST] native selected-pair registry evidence, COM# OS-alias gate, parameter freshness/types, exact CLI failure stage (HKCU fixtures only)");
+}
+
 void uiComRoundtrip(){
     SerialFixture f;wchar_t base[MAX_PATH]={},folder[MAX_PATH]={};GetTempPathW(MAX_PATH,base);GetTempFileNameW(base,L"SCU",0,folder);DeleteFileW(folder);CHECK(CreateDirectoryW(folder,nullptr));directory=folder;configPath=directory+L"\\tcp.ini";
     WNDCLASSW wc={};wc.lpfnWndProc=proc;wc.hInstance=GetModuleHandleW(nullptr);wc.lpszClassName=L"TCPComTestWindow";CHECK(RegisterClassW(&wc));
@@ -154,6 +176,9 @@ int main(){
     SetErrorMode(SEM_FAILCRITICALERRORS|SEM_NOGPFAULTERRORBOX);setvbuf(stdout,nullptr,_IONBF,0);setvbuf(stderr,nullptr,_IONBF,0);
     CHECK(keyboardPacketSize((UINT)(offsetof(RAWINPUT,data)+sizeof(RAWKEYBOARD))));
     SerialOptions options;options.enabled=true;options.bridge=L"COM8";options.application=L"COM7";CHECK(validSerialOptions(options));options.application=L"COM8";CHECK(!validSerialOptions(options));
-    WSADATA w={};CHECK(WSAStartup(MAKEWORD(2,2),&w)==0);CHECK(!requiresCom());CHECK(!validSettings(Settings{}));puts("[TEST] UI");uiAndConfig();puts("[TEST] shared TCP");shared();puts("[TEST] split TCP");separate();puts("[TEST] independent failure");independentFailure();puts("[TEST] COM shared");serialShared();puts("[TEST] COM split faults");serialSplitAndFaults();puts("[TEST] COM-enabled GUI Enter -> TCP -> serial; persistence");uiComRoundtrip();engine.stop();WSACleanup();
+    std::wstring nativeId;CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com11)",nativeId)&&nativeId==L"CNCA1");CHECK(com0com::EndpointIdFromTarget(LR"(\Device\com0com21)",nativeId)&&nativeId==L"CNCB1");CHECK(!com0com::EndpointIdFromTarget(LR"(\Device\Serial0)",nativeId));
+    com0com::CaptureResult diagnostic;diagnostic.status=com0com::CaptureStatus::ParseError;diagnostic.exitCode=0;diagnostic.error="malformed parameter";diagnostic.output="CNCA1 PortName=COM7,dsr=";
+    std::wstring message=com0com::DescribeCaptureFailure(diagnostic);CHECK(message.find(L"解析")!=std::wstring::npos&&message.find(L"740")==std::wstring::npos&&message.find(L"malformed parameter")!=std::wstring::npos);
+    WSADATA w={};CHECK(WSAStartup(MAKEWORD(2,2),&w)==0);CHECK(!requiresCom());CHECK(!validSettings(Settings{}));puts("[TEST] UI");uiAndConfig();puts("[TEST] shared TCP");shared();puts("[TEST] split TCP");separate();puts("[TEST] independent failure");independentFailure();puts("[TEST] COM shared");serialShared();puts("[TEST] COM split faults");serialSplitAndFaults();puts("[TEST] COM-enabled GUI Enter -> TCP -> serial; persistence");uiComRoundtrip();nativeRegistryEvidence();engine.stop();WSACleanup();
     puts("PASS: COM optional; actual TCP worker -> explicit fake serial file, binary/fragmented unsolicited forwarding, shared ACK consent, split ACK excluded, command-failure RX relay, peer close fault latch, failed write latch, fresh pair recheck on reconnect, no old-code replay; no real driver installed. Original TCP/hotkey tests: actual shared/split engine, unsolicited binary RX, exact ASCII/HEX TX, separate ACK channel, independent channel failure, disconnect/no replay, selector conversion, 256-byte roundtrips, atomic config lock failure, hotkey initially off, Win64 exact40-byte raw keyboard -> real network trigger, repeat suppression, key-up/new press, stale/off/own-window/mouse rejection");
 }
