@@ -1,0 +1,2 @@
+       CNCA0 PortName=COM#,RealPortName=COM3
+       CNCB0 PortName=COM#,RealPortName=COM4
